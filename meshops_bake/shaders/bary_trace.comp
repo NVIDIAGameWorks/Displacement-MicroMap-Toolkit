@@ -1,0 +1,272 @@
+/*
+* SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+*
+* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+* property and proprietary rights in and to this material, related
+* documentation and any modifications thereto. Any use, reproduction,
+* disclosure or distribution of this material and related documentation
+* without an express license agreement from NVIDIA CORPORATION or
+* its affiliates is strictly prohibited.
+*/
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_buffer_reference2 : require
+
+#extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_ray_query : enable
+#extension GL_EXT_debug_printf : enable
+
+
+//#extension GL_NV_fragment_shader_barycentric : enable
+
+#include "host_device.h"
+
+#define THREADS_PER_TRIANGLE 128
+layout(local_size_x = THREADS_PER_TRIANGLE) in;
+
+// Buffers
+layout(buffer_reference, scalar) readonly buffer PrimMeshInfos
+{
+  PrimMeshInfo i[];
+};
+layout(buffer_reference, scalar) readonly buffer Vertices
+{
+  CompressedVertex cv[];
+};
+layout(buffer_reference, scalar) readonly buffer Indices
+{
+  uvec3 i[];
+};
+layout(buffer_reference, scalar) readonly buffer Distances
+{
+  float d[];
+};
+layout(buffer_reference, scalar) readonly buffer Triangles
+{
+  Triangle t[];
+};
+layout(buffer_reference, scalar) readonly coherent buffer TriangleMinMaxs
+{
+  vec2 m[];
+};
+layout(buffer_reference, scalar) readonly buffer DirectionBounds
+{
+  vec2 b[];
+};
+layout(buffer_reference, scalar) readonly buffer BaryCoords
+{
+  vec3 v[];
+};
+//layout(buffer_reference, scalar) buffer  InstancesInfo { InstanceInfo i[]; };
+
+//layout(set = 0, binding = eFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
+layout(set = 0, binding = eTlas) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = eSceneDesc) readonly buffer SceneDesc_
+{
+  SceneDescription sceneDesc;
+};
+layout(set = 0, binding = eDistances, scalar) uniform baryBuffer
+{
+  float ddata[];
+};
+
+layout(push_constant) uniform PushContrive_
+{
+  PushHighLow pc;
+};
+
+#include "trace_utils.glsl"
+
+uint encodeMinMaxFp32(float val)
+{
+  uint bits = floatBitsToUint(val);
+  bits ^= (int(bits) >> 31) | 0x80000000u;
+  return bits;
+}
+
+float decodeMinMaxFp32(uint bits)
+{
+  bits ^= ~(int(bits) >> 31) | 0x80000000u;
+  return uintBitsToFloat(bits);
+}
+
+// Keep the min/max distance for the current base triangle and write it out at the end. Each workgroup operates on a
+// single base triangle, tracing rays from microvertices.
+shared uint s_dMin;
+shared uint s_dMax;
+
+//--------------------------------------------------------------------------------------------------
+//
+//
+void main()
+{
+  // Retrieve the Primitive mesh buffer information
+  PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primLoInfoAddress);
+  PrimMeshInfo  pinfo  = pInfo_.i[pc.primMeshID];
+
+  uint primID   = pc.baryTraceBatchOffset + gl_WorkGroupID.x;
+  uint threadID = gl_LocalInvocationID.x;
+
+  uint            triID       = primID + pc.distOffset;
+  Triangles       triangle    = Triangles(sceneDesc.trianglesAddress);
+  TriangleMinMaxs minMaxs     = TriangleMinMaxs(sceneDesc.triangleMinMaxsAddress);
+  uint            subdivLevel = min(triangle.t[triID].subdivLevel, MAX_SUBDIV_LEVELS - 1);
+  uint            valueFirst  = triangle.t[triID].valueFirst;
+  uint            valueCount  = triangle.t[triID].valueCount;
+
+  //------------------------------------------------------------
+  // Sampling info
+
+  // Vextex and indices of the primitive
+  Vertices        vertices            = Vertices(pinfo.vertexAddress);
+  Indices         indices             = Indices(pinfo.indexAddress);
+  DirectionBounds directionBounds     = DirectionBounds(pinfo.vertexDirectionBoundsAddress);
+  DirectionBounds directionBoundsOrig = DirectionBounds(pinfo.vertexDirectionBoundsOrigAddress);
+
+  // Getting the 3 indices of the triangle (local)
+  uvec3 triangleIndex = indices.i[primID];
+
+  // All vertex attributes of the triangle.
+  Vertex v0 = decompressVertex(vertices.cv[triangleIndex.x]);
+  Vertex v1 = decompressVertex(vertices.cv[triangleIndex.y]);
+  Vertex v2 = decompressVertex(vertices.cv[triangleIndex.z]);
+
+  // Get original bounds, before any bounds fitting iterations
+  const vec2 boundsOrig0 = pc.hasDirectionBounds != 0 ? directionBoundsOrig.b[triangleIndex.x] : vec2(0, 1);
+  const vec2 boundsOrig1 = pc.hasDirectionBounds != 0 ? directionBoundsOrig.b[triangleIndex.y] : vec2(0, 1);
+  const vec2 boundsOrig2 = pc.hasDirectionBounds != 0 ? directionBoundsOrig.b[triangleIndex.z] : vec2(0, 1);
+  const vec3 traceBase0  = v0.position + v0.displacementDirection * boundsOrig0.x;
+  const vec3 traceBase1  = v1.position + v1.displacementDirection * boundsOrig1.x;
+  const vec3 traceBase2  = v2.position + v2.displacementDirection * boundsOrig2.x;
+  const vec3 traceMax0   = traceBase0 + v0.displacementDirection * boundsOrig0.y;
+  const vec3 traceMax1   = traceBase1 + v1.displacementDirection * boundsOrig1.y;
+  const vec3 traceMax2   = traceBase2 + v2.displacementDirection * boundsOrig2.y;
+
+  // Current direction vector bounds. Updated based on minMaxs after tracing
+  const vec2 bounds0 = pc.hasDirectionBounds != 0 ? directionBounds.b[triangleIndex.x] : vec2(0, 1);
+  const vec2 bounds1 = pc.hasDirectionBounds != 0 ? directionBounds.b[triangleIndex.y] : vec2(0, 1);
+  const vec2 bounds2 = pc.hasDirectionBounds != 0 ? directionBounds.b[triangleIndex.z] : vec2(0, 1);
+
+  // Trace ray start and direction, which changes with linear interpolation of
+  // points at non-uniform direction bounds
+  const vec3 start0  = v0.position + v0.displacementDirection * bounds0.x;
+  const vec3 start1  = v1.position + v1.displacementDirection * bounds1.x;
+  const vec3 start2  = v2.position + v2.displacementDirection * bounds2.x;
+  const vec3 dir0    = v0.displacementDirection * bounds0.y;
+  const vec3 dir1    = v1.displacementDirection * bounds1.y;
+  const vec3 dir2    = v2.displacementDirection * bounds2.y;
+
+  if(threadID == 0)
+  {
+    s_dMin = encodeMinMaxFp32(FLT_MAX);
+    s_dMax = encodeMinMaxFp32(-FLT_MAX);
+  }
+  barrier();
+
+  for(uint baryCoordID = threadID; baryCoordID < valueCount; baryCoordID += gl_WorkGroupSize.x)
+  {
+    //--
+    BaryCoords baryCoords   = BaryCoords(sceneDesc.baryCoordsAddress[subdivLevel]);
+    vec3       barycentrics = baryCoords.v[baryCoordID];
+
+    // Rays that start exactly on the edge will often miss boundary edges of the
+    // highres mesh. This can be avoided by moving the ray slightly towards the
+    // middle of the triangle. This does so by scaling down the weights slightly
+    // and re-balancing so they still sum to one.
+    const float edgeEpsilon = min(0.0005, 1.0 / float(1 << (MAX_SUBDIV_LEVELS + 3)));
+    barycentrics *= 1.0 - edgeEpsilon;
+    barycentrics += (1.0 - barycentrics.x - barycentrics.y - barycentrics.z) / 3.0;
+
+    // Interpolate the ray across the triangle defined by the direction vector
+    // bounds.
+    const vec3 start   = mixBary(start0, start1, start2, barycentrics);
+    const vec3 dir     = mixBary(dir0, dir1, dir2, barycentrics);
+    const vec3 wStart  = vec3(pc.objectToWorld * vec4(start, 1.0));
+    const vec3 wDir    = mat3(pc.objectToWorld) * dir;
+    float      wDirLen = length(wDir);
+
+    bool valid = wDirLen > 1e-10;
+
+    // Compute surface origin and min/max trace distances relative to the
+    // current ray. The surface origin is the base mesh and the initial
+    // direction bounds define min/max distance to trace. If any intersections
+    // fail, because the triangles are degenerate or the ray misses them, fall
+    // back to scalar projection. This produces displacements closer to each
+    // triangle rather than their plane.
+    float traceOriginT = 0.0;
+    float traceMinT    = 0.0;
+    float traceMaxT    = 0.0;
+    if(valid)
+    {
+      if(!intersectTriangle(start - v0.position, dir, v0.position, v1.position, v2.position, traceOriginT))
+      {
+        vec3 basePosition = mixBary(v0.position, v1.position, v2.position, barycentrics);
+        traceOriginT      = rayNearestT(start, dir, basePosition);
+      }
+      if(!intersectTriangle(start - traceBase0, dir, traceBase0, traceBase1, traceBase2, traceMinT))
+      {
+        vec3 traceBase = mixBary(traceBase0, traceBase1, traceBase2, barycentrics);
+        traceMinT      = rayNearestT(start, dir, traceBase);
+      }
+      if(!intersectTriangle(start - traceMax0, dir, traceMax0, traceMax1, traceMax2, traceMaxT))
+      {
+        vec3 traceMax = mixBary(traceMax0, traceMax1, traceMax2, barycentrics);
+        traceMaxT     = rayNearestT(start, dir, traceMax);
+      }
+    }
+
+    // Command line arguments may override the trace distance and/or trace both forwards and backwards
+    vec2 traceRange = computeTraceRange(wDirLen, traceMinT, traceMaxT);
+
+    //------------------------------------------------------------
+    // Perform the trace. The returned distance is in units of wDir
+    rayQueryEXT rayQuery;
+    HitState    hit;
+    hit.distance = FLT_MAX;
+    bool hitValid = false;
+    if(valid)
+    {
+      hitValid = traceRay(rayQuery, wStart, wDir, gl_RayFlagsNoneNV, traceRange, traceOriginT, hit);
+    }
+
+    //------------------------------------------------------------
+    // Keep the closest distance to the base mesh. This is necessary as we trace the highres mesh in batches and may
+    // sometimes hit geometry from other batches.
+    Distances dist   = Distances(sceneDesc.distancesAddress);
+    uint      offset = (valueFirst + baryCoordID);
+    if(hitValid)
+    {
+      keepNearest(dist.d[offset], hit.distance, traceOriginT);
+    }
+
+    // If after all batches of highres geometry there was no hit, set the
+    // distance to the base mesh surface.
+    if(pc.lastBatch == 1 && dist.d[offset] == FLT_MAX)
+    {
+      dist.d[offset] = traceOriginT;
+    }
+
+    float dMin = subgroupMin(hitValid ? hit.distance : traceOriginT);
+    float dMax = subgroupMax(hitValid ? hit.distance : traceOriginT);
+    if(gl_SubgroupInvocationID == 0)
+    {
+      atomicMin(s_dMin, encodeMinMaxFp32(dMin));
+      atomicMax(s_dMax, encodeMinMaxFp32(dMax));
+    }
+  }
+
+  barrier();
+  if(threadID == 0)
+  {
+    // TODO: compute min/maxs in a separate pass. the following will break when baking in batches
+    minMaxs.m[triID].x = decodeMinMaxFp32(s_dMin);
+    minMaxs.m[triID].y = decodeMinMaxFp32(s_dMax);
+  }
+}

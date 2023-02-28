@@ -1,0 +1,7 @@
+/spv/*
+/build/*
+
+.vs/
+*/_autogen/
+
+.obsidian/

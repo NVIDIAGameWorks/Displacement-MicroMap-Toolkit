@@ -1,0 +1,334 @@
+/*
+* SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+*
+* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+* property and proprietary rights in and to this material, related
+* documentation and any modifications thereto. Any use, reproduction,
+* disclosure or distribution of this material and related documentation
+* without an express license agreement from NVIDIA CORPORATION or
+* its affiliates is strictly prohibited.
+*/
+
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_ray_query : enable
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "generate_importance_host_device.h"
+
+layout(local_size_x = GENERATE_IMPORTANCE_BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+
+// fp32 x 3 + octant normal (snorm16x2)
+layout(binding = eModifiedVertexPositionNormalBuffer, set = 0) buffer ModifiedVertexPositionNormalBuffer
+{
+  vec4 modifiedVertexPositionNormalBuffer[];
+};
+
+
+// 2 x octant normal (snorm16x2)
+layout(binding = eModifiedVertexTangentSpaceBuffer, set = 0) buffer ModifiedVertexTangentSpaceBuffer
+{
+  vec2 modifiedVertexTangentSpaceBuffer[];
+};
+
+
+// n x fp32 x 2
+layout(binding = eModifiedVertexTexcoordBuffer, set = 0) buffer ModifiedVertexTexcoordBuffer
+{
+  vec2 modifiedVertexTexcoordBuffer[];
+};
+
+
+// fp16 x 4
+layout(binding = eModifiedVertexDirectionsBuffer, set = 0) buffer ModifiedVertexDirectionsBuffer
+{
+  f16vec4 modifiedVertexDirectionsBuffer[];
+};
+
+
+// 1 x fp16
+// used by remesher
+layout(binding = eModifiedVertexImportanceBuffer, set = 0) buffer ModifiedVertexImportanceBuffer
+{
+  f16vec2 modifiedVertexImportanceBuffer[];
+};
+
+
+void setModifiedImportance(uint index, float16_t importance)
+{
+  if(index % 2 == 0)
+    modifiedVertexImportanceBuffer[index / 2].x = importance;
+  else
+    modifiedVertexImportanceBuffer[index / 2].y = importance;
+}
+
+
+layout(set = 0, binding = eMeshAccel) uniform accelerationStructureEXT meshAccel;
+
+
+layout(set = 0, binding = eInputImportanceMap) uniform sampler2D importanceMap;
+
+layout(push_constant) uniform _GenerateImportanceConstants
+{
+  GenerateImportanceConstants constants;
+};
+
+
+  //#define CURVATURE_SAMPLES_PHI 64
+  //#define CURVATURE_SAMPLES_THETA 8
+
+#define CURVATURE_SAMPLES_PHI 16
+#define CURVATURE_SAMPLES_THETA 4
+
+  //#define CURVATURE_SAMPLES_PHI 4
+  //#define CURVATURE_SAMPLES_THETA 1
+
+
+#define CURVATURE_SAMPLES CURVATURE_SAMPLES_PHI* CURVATURE_SAMPLES_THETA
+
+
+#define REF(_x) inout _x
+#define RM_CONSTANTS constants
+#ifndef M_PI
+#define M_PI 3.1415926535897932384626433832795
+#endif
+
+
+float mixCurvatures(float c1, float c2)
+{
+  float t = 0.f;
+  if(c1 == 0.f && c2 != 0.f)
+  {
+    t = c2;
+  }
+  if(c1 != 0.f && c2 == 0.f)
+  {
+    t = c1;
+  }
+  if(c1 != 0.f && c2 != 0.f)
+  {
+    t = max(c1, c2);
+  }
+  return t;
+}
+
+
+// Generate a seed for the random generator.
+// Input - pixel.x, pixel.y, frame_nb
+// From https://github.com/Cyan4973/xxHash, https://www.shadertoy.com/view/XlGcRh
+uint xxhash32(uvec3 p)
+{
+  const uvec4 primes = uvec4(2246822519U, 3266489917U, 668265263U, 374761393U);
+  uint        h32;
+  h32 = p.z + primes.w + p.x * primes.y;
+  h32 = primes.z * ((h32 << 17) | (h32 >> (32 - 17)));
+  h32 += p.y * primes.y;
+  h32 = primes.z * ((h32 << 17) | (h32 >> (32 - 17)));
+  h32 = primes.x * (h32 ^ (h32 >> 15));
+  h32 = primes.y * (h32 ^ (h32 >> 13));
+  return h32 ^ (h32 >> 16);
+}
+
+//-----------------------------------------------------------------------
+// https://www.pcg-random.org/
+//-----------------------------------------------------------------------
+uint pcg(REF(uint) state)
+{
+  uint prev = state * 747796405u + 2891336453u;
+  uint word = ((prev >> ((prev >> 28u) + 4u)) ^ prev) * 277803737u;
+  state     = prev;
+  return (word >> 22u) ^ word;
+}
+
+//-----------------------------------------------------------------------
+// Generate a random float in [0, 1) given the previous RNG state
+//-----------------------------------------------------------------------
+float rand(REF(uint) seed)
+{
+  uint r = pcg(seed);
+  return float(r) * (1.0f / float(0xffffffffu));
+}
+
+
+void createCoordinateSystem(vec3 N, REF(vec3) Nt, REF(vec3) Nb)
+{
+  if(abs(N.x) > abs(N.y))
+    Nt = vec3(N.z, 0, -N.x) / sqrt(N.x * N.x + N.z * N.z);
+  else
+    Nt = vec3(0, -N.z, N.y) / sqrt(N.y * N.y + N.z * N.z);
+  Nb = cross(N, Nt);
+}
+
+
+void computeDefaultBasis(const vec3 normal, REF(vec3) x, REF(vec3) y)
+{
+  vec3        z  = normal;
+  const float yz = -z.y * z.z;
+  y = normalize(((abs(z.z) > 0.99999f) ? vec3(-z.x * z.y, 1.0f - z.y * z.y, yz) : vec3(-z.x * z.z, yz, 1.0f - z.z * z.z)));
+
+  x = cross(y, z);
+}
+
+vec3 getDirection(uint index, vec3 x, vec3 y, vec3 z)
+{
+  float r1 = (float(index / CURVATURE_SAMPLES_THETA) / CURVATURE_SAMPLES_PHI);
+  r1 *= (CURVATURE_SAMPLES_PHI + 1) / CURVATURE_SAMPLES_PHI;
+  float phi = 2.f * float(M_PI) * r1;
+
+  float r2 = (float(index % CURVATURE_SAMPLES_THETA) / CURVATURE_SAMPLES_THETA);
+  //float sq = sqrt(1.0 - r2);
+  float sq = sqrt(1.0f - r2 * r2);
+
+  //vec3 direction = vec3(cos(phi) * sq, sin(phi) * sq, sqrt(r2));
+  vec3 direction = vec3(cos(phi) * sq, sin(phi) * sq, r2);
+
+  return direction.x * x + direction.y * y + direction.z * z;
+}
+
+
+vec3 getDirectionRand(REF(uint) seed, vec3 x, vec3 y, vec3 z)
+{
+  float r1  = rand(seed);
+  float phi = 2.f * float(M_PI) * r1;
+
+  float r2 = rand(seed);
+  //float sq = sqrt(1.0 - r2);
+  float sq = sqrt(1.0f - r2 * r2);
+
+  //vec3 direction = vec3(cos(phi) * sq, sin(phi) * sq, sqrt(r2));
+  vec3 direction = vec3(cos(phi) * sq, sin(phi) * sq, r2);
+
+  return direction.x * x + direction.y * y + direction.z * z;
+}
+
+
+vec3 offsetRay(in vec3 p, in vec3 n)
+{
+  const float intScale   = 256.0f;
+  const float floatScale = 1.0f / 65536.0f;
+  const float origin     = 1.0f / 32.0f;
+  ivec3       of_i       = ivec3(intScale * n.x, intScale * n.y, intScale * n.z);
+  vec3        p_i        = vec3(intBitsToFloat(floatBitsToInt(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
+                                intBitsToFloat(floatBitsToInt(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
+                                intBitsToFloat(floatBitsToInt(p.z) + ((p.z < 0) ? -of_i.z : of_i.z)));
+  return vec3(abs(p.x) < origin ? p.x + floatScale * n.x : p_i.x,  //
+              abs(p.y) < origin ? p.y + floatScale * n.y : p_i.y,  //
+              abs(p.z) < origin ? p.z + floatScale * n.z : p_i.z);
+}
+
+float traceRay(vec3 origin, vec3 direction)
+{
+#ifndef __cplusplus
+  rayQueryEXT rayQuery;
+
+  float curvatureMaxDist = RM_CONSTANTS.curvatureMaxDist;
+
+  rayQueryInitializeEXT(rayQuery, meshAccel,
+                        //gl_RayFlagsOpaqueEXT , 0xFF, origin, 1e-3f, direction, 0.5f);// 3.402823466e+36);
+                        gl_RayFlagsOpaqueEXT, 0xFF, origin, 0.f, direction, curvatureMaxDist);  // 3.402823466e+36);
+
+  while(rayQueryProceedEXT(rayQuery))
+  {
+    rayQueryConfirmIntersectionEXT(rayQuery);
+  }
+
+  uint  result = rayQueryGetIntersectionTypeEXT(rayQuery, true);
+  bool  hit    = result == gl_RayQueryCommittedIntersectionTriangleEXT;
+  float t      = -1.f;
+  if(hit)
+  {
+    //vec2 bary   = rayQueryGetIntersectionBarycentricsEXT(rayQuery, true);
+    //uint primID = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, true);
+    //uint instID = rayQueryGetIntersectionInstanceIdEXT(rayQuery, true);
+    t = rayQueryGetIntersectionTEXT(rayQuery, true);
+  }
+  return t;
+#else
+  return 1.f;
+#endif
+}
+
+
+float getCurvature(uint index, vec3 pos, vec3 normal, vec2 texCoord)
+{
+  if(RM_CONSTANTS.hasImportanceMap == 1)
+  {
+    float c = texture(importanceMap, texCoord).x;
+    return c;
+  }
+  //else
+  {
+
+    vec3 offsetP = pos + normal;
+
+    //pos    = vec3((RM_CONSTANTS.objectToWorld * vec4(pos, 1.f)));
+    //normal = normalize(vec3(vec4(normal, 0) * RM_CONSTANTS.worldToObject));
+
+
+    vec3 x, y;
+    createCoordinateSystem(normal, x, y);
+    float avgAbove = 0.f, avgBelow = 0.f;
+    uint  counterAbove = 0, counterBelow = 0;
+    uint  seed = xxhash32(uvec3(index, 1, 1));
+    for(uint i = 0; i < CURVATURE_SAMPLES; i++)
+    {
+      //vec3 dir = getDirection(i, x, y, normal);
+      vec3  dir    = getDirectionRand(seed, x, y, normal);
+      float tAbove = traceRay(offsetRay(pos, normal), dir);
+      float tBelow = traceRay(offsetRay(pos, -normal), -dir);
+      if(tAbove > 0.f)
+      {
+        avgAbove += tAbove;
+        counterAbove++;
+      }
+      if(tBelow > 0.f)
+      {
+        avgBelow += tBelow;
+        counterBelow++;
+      }
+    }
+    if(counterAbove > 0)
+    {
+      avgAbove /= float(counterAbove);
+      //avgAbove = 1.f/avgAbove;
+      avgAbove = (RM_CONSTANTS.curvatureMaxDist - avgAbove) / RM_CONSTANTS.curvatureMaxDist;
+    }
+    if(counterBelow > 0)
+    {
+      avgBelow /= float(counterBelow);
+      avgBelow = (RM_CONSTANTS.curvatureMaxDist - avgBelow) / RM_CONSTANTS.curvatureMaxDist;
+    }
+
+
+    float c = pow(mixCurvatures((float(counterAbove) / float(CURVATURE_SAMPLES)), (float(counterBelow) / float(CURVATURE_SAMPLES))),
+                  1.f / RM_CONSTANTS.curvaturePower);
+    //float c = mixCurvatures((float(counterAbove) / float(CURVATURE_SAMPLES)), (float(counterBelow) / float(CURVATURE_SAMPLES)));
+
+    return c;
+  }
+}
+
+
+void main()
+{
+  uint index = uint(gl_GlobalInvocationID.x);
+  if(index >= (constants.vertexCount))
+  {
+    return;
+  }
+
+  vec4 vertexPositionNormal = modifiedVertexPositionNormalBuffer[index];
+  vec3 vertexNormal         = oct32_to_vec(floatBitsToUint(vertexPositionNormal.w));
+  vec2 vertexTexCoord       = modifiedVertexTexcoordBuffer[constants.texCoordCount * index + constants.texCoordIndex];
+
+  setModifiedImportance(index, float16_t(getCurvature(index, vertexPositionNormal.xyz, vertexNormal, vertexTexCoord)));
+}

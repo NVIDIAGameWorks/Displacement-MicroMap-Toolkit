@@ -1,0 +1,26 @@
+# Any folder starting with an `_`
+**/_*/*
+/external/bin_x64/*
+build/
+cmake_build/
+
+external/downloaded_resources/
+
+./log_micromesh_viewer.txt
+./micromesh_viewer.ini
+./testing/
+
+.cache/
+.vs/
+.vscode/
+
+
+mini_samples/mm_raytrace/.obsidian/
+testmesh/
+remesher/docs/crop.bat
+
+remesher/docs/convert.bat
+
+micromesh_python/notebook/.fuse_hidden000037a800000004
+
+micromesh_python/notebook/assets/simplewall/.fuse_hidden000037a600000005

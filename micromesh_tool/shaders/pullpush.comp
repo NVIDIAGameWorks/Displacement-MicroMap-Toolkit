@@ -1,0 +1,332 @@
+/*
+* SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+*
+* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+* property and proprietary rights in and to this material, related
+* documentation and any modifications thereto. Any use, reproduction,
+* disclosure or distribution of this material and related documentation
+* without an express license agreement from NVIDIA CORPORATION or
+* its affiliates is strictly prohibited.
+*/
+#version 460
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_shader_image_load_formatted : require
+
+// See descriptions in pullpush_filter.cpp
+#define PULLPUSH_MAX_MIP_LEVELS  15
+#define PULLPUSH_MODE_PULL  0
+#define PULLPUSH_MODE_PUSH  1
+#define PULLPUSH_MODE_AVG   2
+#define PULLPUSH_SPC_VARIANT  0
+#define PULLPUSH_SPC_MODE     1
+#define PULLPUSH_BINDING_RGBA_TEXTURE         0
+#define PULLPUSH_BINDING_RGBA_LEVELS          1
+#define PULLPUSH_BINDING_DEPTHWEIGHT_TEXTURE  2
+#define PULLPUSH_BINDING_DEPTHWEIGHT_LEVELS   3
+
+// Must match Variant in pullpush_filter.hpp
+#define PULLPUSH_VARIANT_STANDARD    0
+#define PULLPUSH_VARIANT_NORMALS     1
+#define PULLPUSH_VARIANT_QUATERNIONS 2
+
+layout(push_constant) uniform passUniforms
+{
+  // When pulling and averaging, a nonzero value for levelActive[i] means
+  // that we can read or write level `srcLevel + i`.
+  bvec4 levelActive;
+  // width and height of the level we're reading from (`srcLevel` when pulling
+  // and averaging, and `srcLevel + 1` when pushing).
+  int srcSizeW;
+  int srcSizeH;
+  // Designates the mip level we're reading from when pulling and averaging,
+  // and the level we're writing when pushing.
+  int srcLevel;
+};
+
+layout(binding=PULLPUSH_BINDING_RGBA_TEXTURE) uniform sampler2D rgbaRead;
+layout(binding=PULLPUSH_BINDING_RGBA_LEVELS) uniform image2D    rgbaLevels[PULLPUSH_MAX_MIP_LEVELS];
+layout(binding=PULLPUSH_BINDING_DEPTHWEIGHT_TEXTURE) uniform sampler2D depthWeightRead;
+layout(binding=PULLPUSH_BINDING_DEPTHWEIGHT_LEVELS) uniform image2D    depthWeightLevels[PULLPUSH_MAX_MIP_LEVELS];
+
+layout (constant_id = PULLPUSH_SPC_VARIANT) const uint VARIANT = PULLPUSH_VARIANT_STANDARD;
+layout (constant_id = PULLPUSH_SPC_MODE)    const uint MODE = PULLPUSH_MODE_PULL;
+
+///////////////////////////////////////////////////
+
+layout(local_size_x=32,local_size_y=2) in;
+
+///////////////////////////////////////////////////
+
+vec4 applyNormalizationVariant(vec4 value)
+{
+  if (VARIANT == PULLPUSH_VARIANT_NORMALS)
+  {
+    return vec4((normalize((value.rgb - 0.5) * 2) * 0.5) + 0.5, value.a);
+  }
+  else if(VARIANT == PULLPUSH_VARIANT_QUATERNIONS)
+  {
+    return      (normalize((value     - 0.5) * 2) * 0.5) + 0.5;
+  }
+  return value;
+}
+
+vec4 computeMip(mat4 inputs, vec4 weights, out float outWeight)
+{
+  vec4 result = vec4(0);
+
+  if (MODE == PULLPUSH_MODE_AVG)
+  {
+    // Average all components of the input.
+    result += inputs[0];
+    result += inputs[1];
+    result += inputs[2];
+    result += inputs[3];
+    result *= 0.25;
+  }
+  else
+  {
+    // Note that instead of averaging the weights, we sum them - that way,
+    // weights at higher mip levels steadily approach 1 (see Kraus's pull-push
+    // paper, section 3.2)
+    const float weightSum = dot(weights, vec4(1));
+    outWeight = min(weightSum, 1.0f);
+    
+    if (weightSum > 0.000001)
+    {
+      result += inputs[0] * weights[0];
+      result += inputs[1] * weights[1];
+      result += inputs[2] * weights[2];
+      result += inputs[3] * weights[3];
+      result *= outWeight/weightSum;
+    }
+  }
+  
+  return applyNormalizationVariant(result);
+}
+
+// Turns a depth from level 0 into a weight.
+float depthToWeight(float depth)
+{
+  // Equivalent to std::numeric_limits<float>::max()
+  const float FLT_MAX = uintBitsToFloat(0x7f7fffff);
+  return (depth < FLT_MAX) ? 1.0 : 0.0;
+}
+
+// Read from srcLevel; coord indexes over texels in srcLevel+1; write to
+// srcLevel+1 (and possibly +2 and +3 as well).
+void pull(ivec2 coord)
+{
+  ivec2 outsize  = max(ivec2(1), ivec2(srcSizeW, srcSizeH) / 2);
+  ivec2 outcoord = coord;
+
+  // Note that we handle non-power-of-2 textures by relying on the sampler
+  // clamping: this allows us to act as if each level had a scale factor of 2,
+  // and reading "out of bounds" then returns the closest in-bounds texel.
+  // Otherwise, we'd need to use a larger filter for at least one row and
+  // column when pulling, like nvpro_pyramid or NVTT, or risk skipping some
+  // texels. However, this comes at a quality cost: higher mips might be
+  // slightly off-center, and weight texels on the bottom and right sides of
+  // a texture potentially much higher (for instance, in a 4097 x 4097 texture,
+  // the texel at (4096, 4096) will make it to the 2x2 LOD unchanged.
+  // For the purposes of filling empty space, though, it should be good enough.
+  ivec2 incoord    = coord*2;
+  mat4 valuesRead  = mat4(texelFetchOffset(rgbaRead,        incoord, srcLevel, ivec2(0,0)),
+                          texelFetchOffset(rgbaRead,        incoord, srcLevel, ivec2(1,0)),
+                          texelFetchOffset(rgbaRead,        incoord, srcLevel, ivec2(0,1)),
+                          texelFetchOffset(rgbaRead,        incoord, srcLevel, ivec2(1,1)));
+
+  vec4 weightsRead = vec4(texelFetchOffset(depthWeightRead, incoord, srcLevel, ivec2(0,0)).r,
+                          texelFetchOffset(depthWeightRead, incoord, srcLevel, ivec2(1,0)).r,
+                          texelFetchOffset(depthWeightRead, incoord, srcLevel, ivec2(0,1)).r,
+                          texelFetchOffset(depthWeightRead, incoord, srcLevel, ivec2(1,1)).r);
+  // When reading from level 0, we must convert depths to weights.
+  if(srcLevel == 0){
+    for(int i = 0; i < 4; i++){
+      weightsRead[i] = depthToWeight(weightsRead[i]);
+    }
+  }
+
+  float outWeight = 0.0;
+  vec4 color = computeMip(valuesRead, weightsRead, outWeight);
+
+  if (all(lessThan(outcoord, outsize))) {
+    imageStore(rgbaLevels[srcLevel + 1],        outcoord, color);
+    imageStore(depthWeightLevels[srcLevel + 1], outcoord, vec4(outWeight));
+  }
+
+  // We can use warp operations to potentially fill higher mipmaps without
+  // going out to VRAM and back. This depends on the thread rearrangement
+  // we performed in main().
+  // Write to srcLevel+2 if we're in the first thread of a 2x2 square
+  const uint laneID = gl_SubgroupInvocationID;
+  valuesRead  = mat4(color,
+                     subgroupShuffle(color, laneID + 1),
+                     subgroupShuffle(color, laneID + 2),
+                     subgroupShuffle(color, laneID + 3));
+  weightsRead = vec4(outWeight,
+                     subgroupShuffle(outWeight, laneID + 1),
+                     subgroupShuffle(outWeight, laneID + 2),
+                     subgroupShuffle(outWeight, laneID + 3));
+  if (levelActive[2] && (laneID & 3) == 0)
+  {
+    outcoord /= 2;
+    outsize  = max(ivec2(1), outsize / 2);
+    
+    color = computeMip(valuesRead, weightsRead, outWeight);
+    if (all(lessThan(outcoord, outsize))) {
+      imageStore(rgbaLevels[srcLevel + 2],        outcoord, color);
+      imageStore(depthWeightLevels[srcLevel + 2], outcoord, vec4(outWeight));
+    }
+
+    // Write to srcLevel+3 if we're in the first thread of a 4x4 square
+    valuesRead  = mat4(color,
+                       subgroupShuffle(color, laneID + 4),
+                       subgroupShuffle(color, laneID + 8),
+                       subgroupShuffle(color, laneID + 12));
+    weightsRead = vec4(outWeight,
+                       subgroupShuffle(outWeight, laneID + 4),
+                       subgroupShuffle(outWeight, laneID + 8),
+                       subgroupShuffle(outWeight, laneID + 12));
+    if (levelActive[3] && (laneID & 15) == 0)
+    {
+      outcoord /= 2;
+      outsize  = max(ivec2(1), outsize / 2);
+
+      color = computeMip(valuesRead, weightsRead, outWeight);
+      if (all(lessThan(outcoord, outsize))) {
+        imageStore(rgbaLevels[srcLevel + 3],        outcoord, color);
+        imageStore(depthWeightLevels[srcLevel + 3], outcoord, vec4(outWeight));
+      }
+    }
+  }
+}
+
+///////////////////////////////////////////////////
+
+vec4 getPush(sampler2D src, ivec2 coord, ivec2 coordsub, ivec2 delta)
+{
+  ivec2 mipcoord = coord + (coordsub * 2 - 1) * delta;
+  ivec2 mipsize  = max(ivec2(1), ivec2(srcSizeW, srcSizeH) / 2);
+  
+  // Note: Technically the clamp here is unnecessary, since `texRead` performs
+  // clamping.
+  return texelFetch(src, clamp(mipcoord, ivec2(0,0), mipsize - 1), srcLevel + 1);
+}
+
+// Push colors from srcLevel+1 to srcLevel; coord ranges over srcLevel.
+void push(ivec2 coord)
+{
+  const ivec2 outcoord = coord;
+  if (outcoord.x >= srcSizeW || outcoord.y >= srcSizeH) 
+  {
+    return;
+  }
+
+  const vec4 selfColor  = imageLoad(rgbaLevels[srcLevel],        outcoord);
+  float      selfWeight = imageLoad(depthWeightLevels[srcLevel], outcoord).r;
+  if(srcLevel == 0)
+  {
+    selfWeight = depthToWeight(selfWeight);
+  }
+
+  // incoord ranges over srcLevel+1.
+  const ivec2 incoord    = (outcoord >> 1);
+  const ivec2 incoordsub = (outcoord & 1);
+
+  // Fetch 4 texels from the next higher mip and linearly interpolate them to
+  // get a color for this texel.
+  //
+  // Here's how this works visually. Small squares denote the `outcoord` grid,
+  // and double/large squares are the incoord grid. Texel centers are in the
+  // centers of rectangles.
+  //
+  // Here, x marks our texel in the outcoord grid. In this example,
+  // incoordsub = (1, 0).
+  //
+  //  +---+---+---+---+ u+
+  //  |   |   |   |   |
+  //  +---+---+---+---+
+  //  |   |   |   |   |
+  //  +---+---+---+---+
+  //  |   | x |   |   |
+  //  +---+---+---+---+
+  //  |   |   |   |   |
+  //  +---+---+---+---+
+  //  v+
+  //
+  // Now here's our texel located with respect to the texels we interpolate
+  // from - A, B, C, and D - in the incoord grid with the outcoord grid
+  // superimposed:
+  //
+  //  ++===+===++===+===++ u+
+  //  ||   |   ||   |   ||
+  //  ++---A---++---B---++
+  //  ||   |   ||   |   ||
+  //  ++===+===++===+===++
+  //  ||   | x ||   |   ||
+  //  ++---C---++---D---++
+  //  ||   |   ||   |   ||
+  //  ++===+===++===+===++
+  //  v+
+  //
+  // x is 1/4th of the way along each of the coordinate axes of the square
+  // ABCD. So, linear interpolation gives us the following weights divided by
+  // 16:
+  //
+  //  ++===+===++===+===++ u+
+  //  ||   |   ||   |   ||
+  //  ++---3---++---1---++
+  //  ||   |   ||   |   ||
+  //  ++===+===++===+===++
+  //  ||   | x ||   |   ||
+  //  ++---9---++---3---++
+  //  ||   |   ||   |   ||
+  //  ++===+===++===+===++
+  //  v+
+  vec4 pushColor  = vec4(0);
+  pushColor += getPush(rgbaRead, incoord, incoordsub, ivec2(0, 0)) * 9.0/16.0;
+  pushColor += getPush(rgbaRead, incoord, incoordsub, ivec2(0, 1)) * 3.0/16.0;
+  pushColor += getPush(rgbaRead, incoord, incoordsub, ivec2(1, 0)) * 3.0/16.0;
+  pushColor += getPush(rgbaRead, incoord, incoordsub, ivec2(1, 1)) * 1.0/16.0;
+  
+  vec4 color = mix(pushColor, selfColor, min(1, selfWeight));
+  color = applyNormalizationVariant(color);
+
+  imageStore(rgbaLevels[srcLevel], outcoord, color);
+}
+
+///////////////////////////////////////////////////
+
+void main()
+{
+  // Each workgroup has size (32, 2, 1) (two rows of subgroups) and operates
+  // on an (8, 8, 1) block of texels.
+  ivec2 base   = ivec2(gl_WorkGroupID.xy) * 8;
+  // We arrange threads so that the threads in a row have a layout in an
+  // (8, 4, 1) block so that (using gl_SubgroupInvocationID numbering)
+  // * threads {4i, 4i+1, 4i+2, 4i+3} share a 2x2 square of texels
+  // * threads {16i, 16i+4, 16i+8, 16i+12} will contain results from a 4x4 square
+  // Like this:
+  // 0123456789ABCDEF...
+  //   ->
+  // 0145...
+  // 2367
+  // 89CD
+  // ABEF
+  const int i  = int(gl_LocalInvocationID.x);
+  ivec2 subset = ivec2(( i       & 1) | ((i >> 1) & 2) | ((i >> 2) & 4),
+                       ((i >> 1) & 1) | ((i >> 2) & 2));
+  subset.y    += int(gl_LocalInvocationID.y) * 4;
+  
+  if (MODE == PULLPUSH_MODE_PULL || MODE == PULLPUSH_MODE_AVG)
+  {
+    pull(base + subset);
+  }
+  else 
+  {
+    push(base + subset);
+  }
+}

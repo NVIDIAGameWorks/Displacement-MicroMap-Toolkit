@@ -1,0 +1,289 @@
+/*
+* SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+*
+* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+* property and proprietary rights in and to this material, related
+* documentation and any modifications thereto. Any use, reproduction,
+* disclosure or distribution of this material and related documentation
+* without an express license agreement from NVIDIA CORPORATION or
+* its affiliates is strictly prohibited.
+*/
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "remeshing_host_device.h"
+#include "hash_functions.h"
+
+layout(local_size_x = REMESHER_BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+
+struct RemeshingCurrentState
+{
+  uint triangleCount;
+  uint vertexCount;
+  uint errorState;
+  uint mergeCount;
+  uint debug;
+};
+
+
+// 2 x uint per-vertex
+layout(binding = eGpuRemeshingMeshVertexHashBuffer, set = 0) buffer GpuRemeshingMeshVertexHashBuffer
+{
+  uvec2 vertexHash[];
+};
+
+// fp32 x 3 + octant normal (snorm16x2)
+layout(binding = eModifiedVertexPositionNormalBuffer, set = 0) buffer ModifiedVertexPositionNormalBuffer
+{
+  vec4 modifiedVertexPositionNormalBuffer[];
+};
+
+
+// 2 x octant normal (snorm16x2)
+layout(binding = eModifiedVertexTangentSpaceBuffer, set = 0) buffer ModifiedVertexTangentSpaceBuffer
+{
+  uvec2 modifiedVertexTangentSpaceBuffer[];
+};
+
+
+// n x fp32 x 2
+layout(binding = eModifiedVertexTexcoordBuffer, set = 0) buffer ModifiedVertexTexcoordBuffer
+{
+  vec2 modifiedVertexTexcoordBuffer[];
+};
+
+
+// fp16 x 4
+layout(binding = eModifiedVertexDirectionsBuffer, set = 0) buffer ModifiedVertexDirectionsBuffer
+{
+  f16vec4 modifiedVertexDirectionBuffer[];
+};
+
+// fp32 x 2
+layout(binding = eModifiedVertexDirectionBoundsBuffer, set = 0) buffer ModifiedVertexDirectionBoundsBuffer
+{
+  vec2 modifiedVertexDirectionBoundsBuffer[];
+};
+
+// 1 x fp16
+// used by remesher
+layout(binding = eModifiedVertexImportanceBuffer, set = 0) buffer ModifiedVertexImportanceBuffer
+{
+  f16vec2 modifiedVertexImportanceBuffer[];
+};
+
+float16_t getModifiedImportance(uint index)
+{
+  f16vec2 v = modifiedVertexImportanceBuffer[index / 2];
+  if(index % 2 == 0)
+    return v.x;
+  return v.y;
+}
+
+void setModifiedImportance(uint index, float16_t importance)
+{
+  if(index % 2 == 0)
+    modifiedVertexImportanceBuffer[index / 2].x = importance;
+  else
+    modifiedVertexImportanceBuffer[index / 2].y = importance;
+}
+
+// intermediate buffers used during process
+// ----------------------------------------
+// 3 x uint per-vertex as below
+// RemeshingVertexMergeInfo {
+//  uint32_t vertexIndexA;
+//  uint32_t vertexIndexB;
+//  float    blendAtoB;
+// }
+layout(binding = eGpuRemeshingMeshVertexMergeBuffer, set = 0) buffer GpuRemeshingMeshVertexMergeBuffer
+{
+  uint vertexMerges[];
+};
+
+
+// 1 RemeshingCurrentState struct, used for feedback
+layout(binding = eGpuRemeshingCurrentStateBuffer, set = 0) buffer GpuRemeshingCurrentStateBuffer
+{
+  RemeshingCurrentState currentState;
+};
+
+
+layout(push_constant) uniform _MergeConstants
+{
+  VertexMergeConstants constants;
+};
+
+// Higher precision functions to avoid non-determistic
+// behavior of the built-in functions
+precise float dot_precise(in vec3 v0, in vec3 v1)
+{
+  return v0.x * v1.x + v0.y * v1.y + v0.z * v1.z;
+}
+
+precise vec3 mix_precise(in vec3 v0, in vec3 v1, in float w)
+{
+  return w * v1 + (1.f - w) * v0;
+}
+
+precise vec3 normalize_precise(in vec3 v0)
+{
+  precise float l = sqrt(dot_precise(v0, v0));
+  return v0 / l;
+}
+
+
+void main()
+{
+  uint index = uint(gl_GlobalInvocationID.x);
+  if(index >= (currentState.mergeCount))
+    return;
+
+  uint v0 = vertexMerges[3 * index + 0];
+  uint v1 = vertexMerges[3 * index + 1];
+
+  if(v0 == ~0u || v1 == ~0u)
+    return;
+
+  float w = uintBitsToFloat(vertexMerges[3 * index + 2]);
+
+  bool preserveVolume = (w > 0.f) && (constants.fitToOriginalSurface == 1);
+  w                   = abs(w);
+
+  bool simpleCopy = (w == 1.f && v1 == index);
+
+  // Use precise for position and direction computation
+  // to avoid potential non-deterministic behavior
+  // leading to cracks in the final mesh
+  precise vec4 positionNormal0 = modifiedVertexPositionNormalBuffer[v0];
+  precise vec4 positionNormal1 = modifiedVertexPositionNormalBuffer[v1];
+  precise vec3 position        = mix_precise(positionNormal0.xyz, positionNormal1.xyz, w);
+
+  vec3 normal0     = oct32_to_vec(floatBitsToUint(positionNormal0.w));
+  vec3 normal1     = oct32_to_vec(floatBitsToUint(positionNormal1.w));
+  vec3 normal      = normalize(mix(normal0, normal1, w));
+  uint normalOct32 = vec_to_oct32(normal);
+
+  precise vec3 direction0 = vec3(modifiedVertexDirectionBuffer[v0].xyz);
+  precise vec3 direction1 = vec3(modifiedVertexDirectionBuffer[v1].xyz);
+
+  precise vec3 direction = normalize_precise(mix_precise(direction0, direction1, w));
+
+
+  if(preserveVolume)
+  {
+    // Volume preservation needs to be done with high precision
+    // to avoid generating cracks
+    precise float directionDotD0 = dot_precise(direction, direction0);
+    precise float directionDotD1 = dot_precise(direction, direction1);
+    if(directionDotD0 != 0.f && directionDotD1 != 0.f)
+    {
+      precise float alpha0 = -1.f * (dot_precise(position - positionNormal0.xyz, direction0)) / directionDotD0;
+      precise float alpha1 = -1.f * (dot_precise(position - positionNormal1.xyz, direction1)) / directionDotD1;
+      precise float alpha  = abs(alpha0) < abs(alpha1) ? alpha0 : alpha1;
+      position             = position + alpha * direction;
+    }
+  }
+
+
+  uvec2 tangentSpaceOct320 = modifiedVertexTangentSpaceBuffer[v0];
+  uvec2 tangentSpaceOct321 = modifiedVertexTangentSpaceBuffer[v1];
+
+
+  vec3 tangentSpace0[2];
+  vec3 tangentSpace1[2];
+
+  tangentSpace0[0] = oct32_to_vec(tangentSpaceOct320[0]);
+  tangentSpace0[1] = cross(tangentSpace0[0], normal0) * uintBitsToFloat(tangentSpaceOct320[1]);
+
+  tangentSpace1[0] = oct32_to_vec(tangentSpaceOct321[0]);
+  tangentSpace1[1] = cross(tangentSpace1[0], normal1) * uintBitsToFloat(tangentSpaceOct321[1]);
+
+  vec3 tangentSpace[2] = {normalize(mix(tangentSpace0[0], tangentSpace1[0], w)),
+                          normalize(mix(tangentSpace0[1], tangentSpace1[1], w))};
+  vec3 bitangent       = normalize(cross(tangentSpace[0], normal));
+
+  // Compare the interpolated bitangent against the
+  // expected/post-interpolation-computed bitagnent to find the sign
+  float bitangentSign = 1.f;
+  if(dot(bitangent, tangentSpace[1]) < 0.f)
+  {
+    bitangentSign = -1.f;
+  }
+  uvec2 tangentSpaceOct32 = uvec2(vec_to_oct32(tangentSpace[0]), floatBitsToUint(bitangentSign));
+
+
+  vec2 texcoord = vec2(0.f);
+  for(uint i = 0; i < constants.texcoordCount; i++)
+  {
+    vec2 t0 = modifiedVertexTexcoordBuffer[v0 * constants.texcoordCount + i];
+    vec2 t1 = modifiedVertexTexcoordBuffer[v1 * constants.texcoordCount + i];
+    vec2 t  = mix(t0, t1, w);
+    modifiedVertexTexcoordBuffer[v0 * constants.texcoordCount + i] = t;
+    if(!simpleCopy)
+    {
+      modifiedVertexTexcoordBuffer[v1 * constants.texcoordCount + i] = t;
+    }
+    if(i == constants.texcoordIndex)
+    {
+      texcoord = t;
+    }
+  }
+
+  float16_t importance0 = getModifiedImportance(v0);
+  float16_t importance1 = getModifiedImportance(v1);
+  float16_t importance  = max(importance0, importance1);
+
+
+  vec2 directionBounds0 = modifiedVertexDirectionBoundsBuffer[v0];
+  vec2 directionBounds1 = modifiedVertexDirectionBoundsBuffer[v1];
+  vec2 directionBounds = vec2(min(directionBounds0.x, directionBounds1.x), max(directionBounds0.y, directionBounds1.y));
+
+  vec4  positionNormal = vec4(position.xyz, uintBitsToFloat(normalOct32));
+  uvec2 h              = uvec2(0u);
+  h                    = addHash(h, positionNormal.xyz);
+  if(constants.useNormal != 0)
+  {
+    h = addHash(h, positionNormal.w);
+  }
+  if(constants.useTangent != 0)
+  {
+    h = addHash(h, tangentSpaceOct32);
+  }
+  if(constants.useDirection != 0)
+  {
+    h = addHash(h, f16vec3(direction.xyz));
+  }
+  if(constants.useTexCoord != 0)
+  {
+    h = addHash(h, texcoord);
+  }
+
+
+  if(!simpleCopy)
+  {
+    vertexHash[v1]                          = h;
+    modifiedVertexPositionNormalBuffer[v1]  = positionNormal;
+    modifiedVertexTangentSpaceBuffer[v1]    = tangentSpaceOct32;
+    modifiedVertexDirectionBuffer[v1]       = f16vec4(direction, 1.f);
+    modifiedVertexDirectionBoundsBuffer[v1] = directionBounds;
+    setModifiedImportance(v1, importance);
+  }
+  vertexHash[v0]                         = h;
+  modifiedVertexPositionNormalBuffer[v0] = positionNormal;
+  modifiedVertexTangentSpaceBuffer[v0]   = tangentSpaceOct32;
+  modifiedVertexDirectionBuffer[v0]      = f16vec4(direction, 1.f);
+  ;
+  modifiedVertexDirectionBoundsBuffer[v0] = directionBounds;
+  setModifiedImportance(v0, importance);
+}

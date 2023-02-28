@@ -1,0 +1,135 @@
+/*
+* SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+* SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+*
+* NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+* property and proprietary rights in and to this material, related
+* documentation and any modifications thereto. Any use, reproduction,
+* disclosure or distribution of this material and related documentation
+* without an express license agreement from NVIDIA CORPORATION or
+* its affiliates is strictly prohibited.
+*/
+
+
+#version 460
+
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_ray_query : enable
+#extension GL_EXT_scalar_block_layout : enable
+
+#include "remeshing_host_device.h"
+#include "hash_functions.h"
+
+layout(local_size_x = REMESHER_BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+
+// fp32 x 3 + octant normal (snorm16x2)
+layout(binding = eModifiedVertexPositionNormalBuffer, set = 0) buffer ModifiedVertexPositionNormalBuffer
+{
+  vec4 modifiedVertexPositionNormalBuffer[];
+};
+
+
+// 2 x octant normal (snorm16x2)
+layout(binding = eModifiedVertexTangentSpaceBuffer, set = 0) buffer ModifiedVertexTangentSpaceBuffer
+{
+  vec2 modifiedVertexTangentSpaceBuffer[];
+};
+
+
+// n x fp32 x 2
+layout(binding = eModifiedVertexTexcoordBuffer, set = 0) buffer ModifiedVertexTexcoordBuffer
+{
+  vec2 modifiedVertexTexcoordBuffer[];
+};
+
+
+// fp16 x 4
+layout(binding = eModifiedVertexDirectionsBuffer, set = 0) buffer ModifiedVertexDirectionsBuffer
+{
+  f16vec4 modifiedVertexDirectionBuffer[];
+};
+
+// fp32 x 2
+layout(binding = eModifiedVertexDirectionBoundsBuffer, set = 0) buffer ModifiedVertexDirectionBoundsBuffer
+{
+  vec2 modifiedVertexDirectionBoundsBuffer[];
+};
+
+// 1 x fp16
+// used by remesher
+layout(binding = eModifiedVertexImportanceBuffer, set = 0) buffer ModifiedVertexImportanceBuffer
+{
+  f16vec2 modifiedVertexImportanceBuffer[];
+};
+
+float16_t getModifiedImportance(uint index)
+{
+  f16vec2 v = modifiedVertexImportanceBuffer[index / 2];
+  if(index % 2 == 0)
+    return v.x;
+  return v.y;
+}
+
+void setModifiedImportance(uint index, float16_t importance)
+{
+  if(index % 2 == 0)
+    modifiedVertexImportanceBuffer[index / 2].x = importance;
+  else
+    modifiedVertexImportanceBuffer[index / 2].y = importance;
+}
+
+
+// 2 x uint per-vertex
+layout(binding = eGpuRemeshingMeshVertexHashBuffer, set = 0) buffer GpuRemeshingMeshVertexHashBuffer
+{
+  uvec2 remeshingVertexHash[];
+};
+
+
+layout(push_constant) uniform _CopyConstants
+{
+  VertexCopyConstants constants;
+};
+
+void main()
+{
+  uint index = uint(gl_GlobalInvocationID.x);
+  if(index >= (constants.itemCount))
+  {
+    return;
+  }
+
+
+  vec3 vertexDirection      = modifiedVertexDirectionBuffer[index].xyz;
+  vec4 vertexPositionNormal = modifiedVertexPositionNormalBuffer[index];
+  vec2 texcoord             = modifiedVertexTexcoordBuffer[index * constants.texcoordCount + constants.texcoordIndex];
+
+
+  uvec2 h = uvec2(0);
+  h       = addHash(h, vertexPositionNormal.xyz);
+
+  if(constants.useNormal != 0)
+  {
+    h = addHash(h, vertexPositionNormal.w);
+  }
+  if(constants.useTangent != 0)
+  {
+    h = addHash(h, modifiedVertexTangentSpaceBuffer[index]);
+  }
+  if(constants.useDirection != 0)
+  {
+    h = addHash(h, vertexDirection.xyz);
+  }
+  if(constants.useTexCoord != 0)
+  {
+    h = addHash(h, texcoord);
+  }
+
+  remeshingVertexHash[index] = h;
+}

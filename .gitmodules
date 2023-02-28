@@ -1,0 +1,18 @@
+# Submodules that require authentication are listed with relative paths.
+# This makes it so that if a developer can clone partner_tools, they can also
+# clone the submodules, even if they only have one of HTTPS or SSH
+# authentication set up. Since libpng's Git does not require authentication,
+# it does not use a relative path.
+[submodule "external/nvpro_core"]
+	path = external/nvpro_core
+	url = https://github.com/nvpro-samples/nvpro_core.git
+[submodule "external/libpng"]
+	path = external/libpng
+	url = https://git.code.sf.net/p/libpng/code
+	shallow = true
+[submodule "external/Displacement-MicroMap-SDK"]
+	path = external/Displacement-MicroMap-SDK
+	url = ../Displacement-MicroMap-SDK.git
+[submodule "external/Displacement-MicroMap-BaryFile"]
+	path = external/Displacement-MicroMap-BaryFile
+	url = ../Displacement-MicroMap-BaryFile.git

@@ -1,0 +1,89 @@
+/*
+*  Copyright (c) 2014-2023, NVIDIA CORPORATION.All rights reserved.
+*
+*  Redistribution and use in source and binary forms, with or without
+*  modification, are permitted provided that the following conditions
+*  are met :
+*  * Redistributions of source code must retain the above copyright
+*    notice, this list of conditions and the following disclaimer.
+*  * Redistributions in binary form must reproduce the above copyright
+*    notice, this list of conditions and the following disclaimer in the
+*    documentation and / or other materials provided with the distribution.
+*  * Neither the name of NVIDIA CORPORATION nor the names of its
+*    contributors may be used to endorse or promote products derived
+*    from this software without specific prior written permission.
+*
+*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+*  EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+*  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+*  PURPOSE ARE DISCLAIMED.IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+*  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+*  EXEMPLARY, OR CONSEQUENTIAL DAMAGES( INCLUDING, BUT NOT LIMITED TO,
+*  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+*  PROFITS; OR BUSINESS INTERRUPTION ) HOWEVER CAUSED AND ON ANY THEORY
+*  OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+*  ( INCLUDING NEGLIGENCE OR OTHERWISE ) ARISING IN ANY WAY OUT OF THE USE
+*  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_control_flow_attributes : require
+
+#include "hbao.h"
+
+layout(binding = NVHBAO_MAIN_TEX_DEPTH) uniform sampler2D inputTexture;
+layout(binding = NVHBAO_MAIN_IMG_LINDEPTH, r32f) uniform image2D imgLinearDepth;
+#if NVHBAO_SKIP_INTERPASS
+layout(binding = NVHBAO_MAIN_IMG_DEPTHARRAY, r32f) uniform image2DArray imgLinearDepthArray;
+#endif
+
+
+float reconstructCSZ(float d, vec4 clipInfo)
+{
+#if 1
+  vec4 ndc    = vec4(0, 0, d, 1);
+  vec4 unproj = control.InvProjMatrix * ndc;
+  return unproj.z / unproj.w;
+#else
+  // clipInfo = z_n * z_f,  z_n - z_f,  z_f, perspective = 1 : 0
+
+  if(clipInfo[3] != 0)
+  {
+    return (clipInfo[0] / (clipInfo[1] * d + clipInfo[2]));
+  }
+  else
+  {
+    return (clipInfo[1] + clipInfo[2] - d * clipInfo[1]);
+  }
+#endif
+}
+/*
+    if (in_perspective == 1.0) // perspective
+    {
+        ze = (zNear * zFar) / (zFar - zb * (zFar - zNear)); 
+    }
+    else // orthographic proj 
+    {
+        ze  = zNear + zb  * (zFar - zNear);
+    }
+*/
+void main()
+{
+  ivec2 intCoord;
+  vec2  texCoord;
+
+  if(setupCoordFull(intCoord, texCoord))
+    return;
+
+  float depth    = textureLod(inputTexture, texCoord.xy, 0).x;
+  float linDepth = reconstructCSZ(depth, control.projReconstruct);
+  imageStore(imgLinearDepth, intCoord, vec4(linDepth, 0, 0, 0));
+#if NVHBAO_SKIP_INTERPASS
+  ivec2 FullResPos    = intCoord;
+  ivec2 Offset        = FullResPos & 3;
+  int   SliceId       = Offset.y * 4 + Offset.x;
+  ivec2 QuarterResPos = FullResPos >> 2;
+  imageStore(imgLinearDepthArray, ivec3(QuarterResPos, SliceId), vec4(linDepth, 0, 0, 0));
+#endif
+}

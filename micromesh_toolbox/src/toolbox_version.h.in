@@ -1,0 +1,4 @@
+
+#define MICROMESH_TOOLBOX_VERSION_MAJOR @micromesh_toolkit_VERSION_MAJOR@
+#define MICROMESH_TOOLBOX_VERSION_MINOR @micromesh_toolkit_VERSION_MINOR@
+#define MICROMESH_TOOLBOX_VERSION_STRING "@micromesh_toolkit_VERSION_MAJOR@.@micromesh_toolkit_VERSION_MINOR@"

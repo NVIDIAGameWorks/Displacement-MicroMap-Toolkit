@@ -1,0 +1,2 @@
+@SET_ENV_CMD@ PYTHONPATH=@PYTHON_PATH@
+@Python3_EXECUTABLE@ -m jupyterlab --notebook-dir=@CMAKE_CURRENT_SOURCE_DIR@/notebook @CMAKE_CURRENT_SOURCE_DIR@/notebook/micromesh.ipynb

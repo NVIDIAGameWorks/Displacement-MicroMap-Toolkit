@@ -1,0 +1,17 @@
+# python package.py -b package/ -r cloudfront
+
+from importlib.machinery import SourceFileLoader
+
+pm = SourceFileLoader("pm", "@CMAKE_CURRENT_BINARY_DIR@/packman-packager/packman_packager.py").load_module()
+
+artifacts = [
+    pm.PackagedArtifact("@CMAKE_CURRENT_BINARY_DIR@/module/@PROJECT_NAME@.@MODULE_EXT@", dest=".")
+]
+version_list = str("@MICROMESH_PYTHON_VERSION@").split(".", 2)
+packager = pm.Packager(
+    package_name="micromesh-python",
+    version=pm.Version(version_list[0], version_list[1], version_list[2]),
+    platform="@PYTHON_VERSION@.@BUILD_PLATFORM@.@BUILD_TYPE@",
+    artifacts=artifacts
+)
+packager.run()
