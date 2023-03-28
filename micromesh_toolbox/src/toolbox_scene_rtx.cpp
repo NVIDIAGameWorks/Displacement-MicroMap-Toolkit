@@ -194,7 +194,7 @@ void ToolboxSceneRtx::createTopLevelAS(const std::unique_ptr<micromesh_tool::Too
 {
   nvh::ScopedTimer _st("- Create TLAS");
 
-  const std::vector<micromesh_tool::ToolScene::PrimitiveInstance>& prim_instances = scene->getPrimitiveInstances();
+  meshops::ArrayView<micromesh_tool::ToolScene::PrimitiveInstance> prim_instances = scene->instances();
 
   std::vector<VkAccelerationStructureInstanceKHR> tlas;
   tlas.reserve(prim_instances.size());

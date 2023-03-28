@@ -42,7 +42,6 @@ public:
 
   const meshops::DeviceMesh& deviceMesh(uint32_t m) const { return m_deviceMeshes[m]; }
   bool                       hasRtxMicromesh() const { return !m_barys.empty() && m_hasDisplacementMicromeshExt; }
-  std::string                hasRtxMicromeshReason() const { return m_hasRtxMicromeshReason; }
 
 private:
   struct SceneImage  // Image to be loaded and created
@@ -95,7 +94,6 @@ private:
   std::vector<SceneImage>    m_images;
   std::vector<nvvk::Texture> m_textures;  // Vector of all textures of the scene
 
-  // True if VK_NV_displacement_micromap exists, and it does not use a fallback.
-  bool        m_hasDisplacementMicromeshExt = false;
-  std::string m_hasRtxMicromeshReason;  // #!584
+  // True if VK_NV_displacement_micromap exists
+  bool m_hasDisplacementMicromeshExt = false;
 };

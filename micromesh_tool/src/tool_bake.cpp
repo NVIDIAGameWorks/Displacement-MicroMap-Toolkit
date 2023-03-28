@@ -367,8 +367,8 @@ bool toolBake(micromesh_tool::ToolContext&                context,
   {
     LOGI("Mesh %zu/%zu\n", meshIndex + 1, base->meshes().size());
 
-    const std::unique_ptr<ToolMesh>& baseMesh      = base->meshes()[meshIndex];
-    const ToolMesh*    referenceMesh = reference.meshes()[meshIndex];
+    const std::unique_ptr<ToolMesh>&       baseMesh      = base->meshes()[meshIndex];
+    const std::unique_ptr<const ToolMesh>& referenceMesh = reference.meshes()[meshIndex];
 
     // Create some temporary reference mesh data storage. Some attributes, such
     // as triangleSubdivLevels, may need to be generated for baking, but it

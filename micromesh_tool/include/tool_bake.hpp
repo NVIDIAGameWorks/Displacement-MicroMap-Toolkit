@@ -95,7 +95,7 @@ struct ToolBakeArgs
   meshops::TangentSpaceAlgorithm tangentAlgorithm     = meshops::TangentSpaceAlgorithm::eDefault;
   bool                           fitDirectionBounds   = true;
   bool                           heightmapPNtriangles = false;
-  bool                           discardDirectionBounds = true;
+  bool                           discardDirectionBounds = false;
 #if 0
   bool               separateBaryFiles       = false;
 #endif

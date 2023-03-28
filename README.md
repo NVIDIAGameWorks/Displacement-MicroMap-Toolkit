@@ -202,8 +202,7 @@ If available, `VK_NV_displacement_micromap` is used to render micromeshes with
 raytracing when choosing *Rendering -> RTX*. `VK_NV_displacement_micromap` was
 introduced with the Ada Lovelace architecture based GPUs. If you see a message
 about the missing extension, update to the latest driver (note: beta drivers are
-available at https://developer.nvidia.com/vulkan-driver). A driver may not be
-available at the time of writing.
+available at https://developer.nvidia.com/vulkan-driver).
 
 > The rasterization of micromeshes, especially compressed is a bit of
   a more complex topic on its own. Therefore there will be a future

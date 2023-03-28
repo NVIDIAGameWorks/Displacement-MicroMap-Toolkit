@@ -231,18 +231,6 @@ micromesh::Result ToolScene::create(const std::unique_ptr<ToolScene>& source)
   m_images        = std::move(images);
   m_auxImages     = std::move(auxImages);
   m_primInstances = source->m_primInstances;
-  for(auto& mesh : m_meshes)
-  {
-    m_constMeshes.push_back(mesh.get());
-  }
-  for(auto& bary : m_barys)
-  {
-    m_constBarys.push_back(bary.get());
-  }
-  for(auto& image : m_images)
-  {
-    m_constImages.push_back(image.get());
-  }
   return micromesh::Result::eSuccess;
 }
 
@@ -254,11 +242,9 @@ void ToolScene::destroy()
     bary->destroy();
   }
   m_barys.clear();
-  m_constBarys.clear();
   m_primInstances.clear();
   // Signal that the scene has been "destroyed"
   m_meshes.clear();
-  m_constMeshes.clear();
   m_model.reset();
 }
 
@@ -745,7 +731,6 @@ void ToolScene::createViews()
       processedPrim[key] = static_cast<uint32_t>(m_meshes.size());
       m_meshes.push_back(std::make_unique<ToolMesh>(m_model.get(), (tinygltf::Mesh*)&prim_node.mesh,
                                                     (tinygltf::Primitive*)&prim_node.primitive, prim_node.matrix, baryView));
-      m_constMeshes.push_back(m_meshes.back().get());
     }
     else if(!warnedDuplicates)
     {
@@ -788,14 +773,12 @@ void ToolScene::setMesh(size_t meshIndex, std::unique_ptr<ToolMesh> mesh)
   assert(relations.bary == -1
          || (relations.group >= 0 && static_cast<size_t>(relations.group) < m_barys[relations.bary]->groups().size()));
   m_meshes[meshIndex]      = std::move(mesh);
-  m_constMeshes[meshIndex] = m_meshes[meshIndex].get();
 }
 
 void ToolScene::setImage(size_t imageIndex, std::unique_ptr<ToolImage> image)
 {
   assert(imageIndex < m_images.size());
   m_images[imageIndex]      = std::move(image);
-  m_constImages[imageIndex] = m_images[imageIndex].get();
 }
 
 size_t ToolScene::replaceBarys(std::unique_ptr<ToolBary> bary)
@@ -805,7 +788,6 @@ size_t ToolScene::replaceBarys(std::unique_ptr<ToolBary> bary)
   // Add the given micromap as the sole entry in m_micromaps
   size_t baryIndex = m_barys.size();
   m_barys.push_back(std::move(bary));
-  m_constBarys.push_back(m_barys.back().get());
   return baryIndex;
 }
 
@@ -848,14 +830,12 @@ void ToolScene::clearBarys()
     bary->destroy();
   }
   m_barys.clear();
-  m_constBarys.clear();
 }
 
 uint32_t ToolScene::createImage()
 {
   auto index = static_cast<uint32_t>(m_images.size());
   m_images.push_back(std::make_unique<micromesh_tool::ToolImage>());
-  m_constImages.push_back(m_images.back().get());
   return index;
 }
 
@@ -875,7 +855,6 @@ bool ToolScene::loadBarys(const fs::path& basePath)
   (void)getGLTFMicromapCount(model(), micromapCount);
 
   m_barys.resize(micromapCount);
-  m_constBarys.resize(micromapCount);
   for(size_t i = 0; i < micromapCount; ++i)
   {
     NV_micromap micromapExt;
@@ -883,7 +862,6 @@ bool ToolScene::loadBarys(const fs::path& basePath)
     {
       LOGE("Error: Failed to get micromap at index %zu\n", i);
       m_barys.clear();
-      m_constBarys.clear();
       return false;
     }
 
@@ -892,10 +870,8 @@ bool ToolScene::loadBarys(const fs::path& basePath)
     if(m_barys[i]->create(basePath, baryFilename) != micromesh::Result::eSuccess)
     {
       m_barys.clear();
-      m_constBarys.clear();
       return false;
     }
-    m_constBarys[i] = m_barys[i].get();
   }
 
   // Clear all the gltf micromap references now that we have transferred them to
@@ -929,7 +905,6 @@ bool ToolScene::loadImages(const fs::path& basePath)
   for(auto& gltfImage : m_model->images)
   {
     m_images.push_back(std::make_unique<micromesh_tool::ToolImage>());
-    m_constImages.push_back(m_images.back().get());
     if(!gltfImage.uri.empty())
     {
       fs::path basePathAbs  = basePath.empty() ? fs::current_path() : fs::absolute(basePath);
@@ -1006,7 +981,7 @@ ToolSceneDimensions::ToolSceneDimensions(const ToolScene& scene)
   // Find the union of all object space bounding boxes transformed to world space
   for(auto& instance : scene.getPrimitiveInstances())
   {
-    const ToolMesh* mesh        = scene.meshes()[instance.primMeshRef];
+    auto&           mesh        = scene.meshes()[instance.primMeshRef];
     bool            foundMinMax = false;
     nvmath::vec3f   posMin;
     nvmath::vec3f   posMax;

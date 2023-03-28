@@ -275,8 +275,15 @@ Unchecking the *Fit to original surface* remesher option may help in extreme
 remeshing cases. See [meshops_remesher/README.md](../meshops_remesher/README.md)
 for more information.
 
+The remesher generates direction bounds for the baker. These can sometimes be
+too large and the sudden change can be problematic for the baker's bounds
+fitting. In such cases, just using uniform initial bounds by checking *Discard
+Input Bounds* in the baker can help. The baker's Max Ray Trace Length will then
+be used instead.
+
 <img src="failure_overlap.jpg" height="200">
 <img src="failure_overlap2.jpg" height="200">
+<img src="failure_bounds3.jpg" height="200">
 
 Decimating too much, e.g. more than a factor of 1024&#215;, will likely result
 in undersampling the reference surface as there is a maximum of 5 subdivision

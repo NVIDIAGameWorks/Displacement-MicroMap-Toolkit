@@ -19,12 +19,7 @@
 #include "nvh/gltfscene.hpp"
 #include "nvvk/images_vk.hpp"
 #include "shaders/dh_scn_desc.h"
-#include "toolbox_version.h"
 #include "vulkan_mutex.h"
-
-#if defined(NVP_SUPPORTS_NVML)  // #!584
-#include "nvml.h"
-#endif
 
 ToolboxSceneVk::ToolboxSceneVk(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, meshops::Context context, nvvk::Context::Queue extraQueue)
     : m_ctx(ctx)
@@ -41,105 +36,6 @@ ToolboxSceneVk::~ToolboxSceneVk()
   assert(m_deviceMeshes.empty());
 }
 
-static bool computeDmmExtEnabled(nvvk::Context& ctx, std::string& reason)
-{
-  if(!ctx.hasDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME))
-  {
-    return false;
-  }
-
-  // WORKAROUND: Avoid a known crash by disabling micromesh for GPUs older
-  // than Ada with these specific drivers.
-#if 1  // #!584
-
-  // If the driver is not one of these, enable displacement micromap. Otherwise,
-  // go on to check the gpu arch.
-  LOGI("Driver version: %u\n", ctx.m_physicalInfo.properties10.driverVersion);
-  if(ctx.m_physicalInfo.properties10.driverVersion != 2227896320 && ctx.m_physicalInfo.properties10.driverVersion != 2202780544)
-  {
-    return true;
-  }
-
-  // Complex NVML-based logic to check to avoid errors in the beta driver
-#if !defined(NVP_SUPPORTS_NVML)
-  reason = "the Toolbox was built without NVML.";
-  return false;
-#else
-
-  static bool        adaCheckPassed = false;
-  static std::string adaCheckReason;
-  static bool        adaCheckStarted = false;  // Ensures we only run this code once
-  if(adaCheckStarted)
-  {
-    reason = adaCheckReason;
-    return adaCheckPassed;
-  }
-
-  adaCheckStarted = true;
-  // This doesn't interfere with the NVML monitor because nvmlInit()
-  // and nvmlShutdown() count the number of times they have been called.
-  struct ScopedNvml
-  {
-    bool valid = false;
-    ScopedNvml() { valid = (NVML_SUCCESS == nvmlInit()); }
-    ~ScopedNvml()
-    {
-      if(valid)
-        nvmlShutdown();
-    }
-  } scopedNvml = ScopedNvml();
-
-  if(!scopedNvml.valid)
-  {
-    reason = adaCheckReason = "nvmlInit() failed.";
-    return (adaCheckPassed = false);
-  }
-
-  unsigned int physicalGpuCount = 0;
-  if(NVML_SUCCESS != nvmlDeviceGetCount(&physicalGpuCount))
-  {
-    reason = adaCheckReason = "nvmlDeviceGetCount() failed.";
-    return (adaCheckPassed = false);
-  }
-
-  for(unsigned int i = 0; i < physicalGpuCount; i++)
-  {
-    nvmlDevice_t device{};
-    if(NVML_SUCCESS != nvmlDeviceGetHandleByIndex(i, &device))
-      continue;
-
-    std::array<char, 96> name{};
-    if(NVML_SUCCESS != nvmlDeviceGetName(device, name.data(), (unsigned int)name.size()))
-      continue;
-
-    if(strcmp(name.data(), ctx.m_physicalInfo.properties10.deviceName) == 0)
-    {
-      // This is the device we're rendering with! Is it an Ada Lovelace or newer GPU?
-      nvmlDeviceArchitecture_t architecture = 0;
-      if(NVML_SUCCESS != nvmlDeviceGetArchitecture(device, &architecture))
-      {
-        reason = adaCheckReason = "nvmlDeviceGetArchitecture() failed.";
-        return (adaCheckPassed = false);
-      }
-
-      adaCheckPassed = (architecture > NVML_DEVICE_ARCH_AMPERE);
-      if(!adaCheckPassed)
-      {
-        reason = adaCheckReason = std::string(
-            "not enabled because of a known issue in the first beta driver with pre-Ada GPUs and "
-            "version " MICROMESH_TOOLBOX_VERSION_STRING
-            " of the Toolbox. The dmm_displacement sample will ray trace correctly on this GPU, however, and "
-            "the Toolbox will ray trace on Ada GPUs correctly.");
-      }
-      return adaCheckPassed;
-    }
-  }
-  reason = adaCheckReason = "the GPU names returned by NVML did not match the Vulkan GPU names.";
-  return (adaCheckPassed = false);
-#endif
-#endif  // #!584
-}
-
 //--------------------------------------------------------------------------------------------------
 // Create all Vulkan resources to hold a nvvkhl::Scene
 //
@@ -147,7 +43,7 @@ void ToolboxSceneVk::create(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn)
 {
   destroy();  // Make sure not to leave allocated buffers
 
-  m_hasDisplacementMicromeshExt = computeDmmExtEnabled(*m_ctx, m_hasRtxMicromeshReason);
+  m_hasDisplacementMicromeshExt = m_ctx->hasDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME);
 
   createMaterialBuffer(cmd, scn);
   createInstanceInfoBuffer(cmd, scn);

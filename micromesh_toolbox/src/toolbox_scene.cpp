@@ -207,7 +207,7 @@ std::vector<uint32_t> ToolboxScene::getNodes(SceneNodeMethods shading, SceneNode
   std::vector<uint32_t> nodes;  // return a vector of nodes corresponding on the requested values
   std::bitset<2>        test;
 
-  for(uint32_t node_id = 0; node_id < m_toolscene->getPrimitiveInstances().size(); node_id++)
+  for(uint32_t node_id = 0; node_id < m_toolscene->instances().size(); node_id++)
   {
     // If we don't care about the value, we use the same as the one from the m_shadeNodes
     test.set(0, shading == SceneNodeMethods::eAll ? m_shadeNodes[node_id][0] : shading == SceneNodeMethods::eSolid);
@@ -387,7 +387,7 @@ void ToolboxScene::setCameraFromScene(const std::filesystem::path& filename)
 // Position 1: micromesh
 void ToolboxScene::setShadeNodes()
 {
-  const auto& prim_inst = m_toolscene->getPrimitiveInstances();
+  const auto& prim_inst = m_toolscene->instances();
   const auto& meshes    = m_toolscene->meshes();
 
   m_shadeNodes.resize(prim_inst.size());  // Storing the

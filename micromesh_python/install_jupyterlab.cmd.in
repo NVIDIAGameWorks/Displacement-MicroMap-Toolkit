@@ -1,1 +1,1 @@
-@Python3_EXECUTABLE@ -m pip install jupyterlab numpy numba py7zr
+@PYTHON_EXE@ -m pip install jupyterlab numpy numba py7zr

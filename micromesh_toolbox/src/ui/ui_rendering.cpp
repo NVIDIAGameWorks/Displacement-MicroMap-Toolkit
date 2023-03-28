@@ -12,6 +12,7 @@
 
 #include "ui_rendering.hpp"
 #include "imgui_helper.h"
+#include "nvvk/context_vk.hpp"
 #include "toolbox_viewer.hpp"
 
 UiRendering::UiRendering(ToolboxViewer* v)
@@ -24,6 +25,7 @@ bool UiRendering::onUI(ViewerSettings& settings)
   using PE = ImGuiH::PropertyEditor;
   ImGui::PushID("UiRendering");
 
+
   bool changed = false;
   changed |= ImGui::RadioButton("RTX", reinterpret_cast<int*>(&settings.renderSystem), ViewerSettings::ePathtracer);
   ImGui::SameLine();
@@ -31,6 +33,13 @@ bool UiRendering::onUI(ViewerSettings& settings)
   ImGui::SameLine();
   ImGui::TextDisabled("(R) Toggle render");
 
+  // Warn if the driver is out of date
+  nvvk::Context& ctx = *_v->m_app->getContext();
+  if(ctx.m_physicalInfo.properties10.driverVersion == 2227896320 || ctx.m_physicalInfo.properties10.driverVersion == 2202780544)
+  {
+    ImGui::TextColored(ImVec4(0.8F, 0.5F, 0.5F, 1.0F), "Driver update required");
+    ImGuiH::tooltip("This driver has a known issue with micromesh on pre-Ada GPUs", true);
+  }
 
   PE::begin();
 
@@ -120,21 +129,7 @@ void UiRendering::sceneWarnings(const ViewerSettings::RenderView& view)
 
   if(view.baked && scene->getToolSceneRtx() && !scene->getToolSceneVK()->barys().empty() && !scene->getToolSceneVK()->hasRtxMicromesh())
   {
-#if 1  // #!584
-    if(!scene->getToolSceneVK()->hasRtxMicromeshReason().empty())
-    {
-      ImGui::TextColored(warningColor, VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME " is available but not enabled");
-      const std::string tooltipMessage = VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME " is available, but "
-                                         + scene->getToolSceneVK()->hasRtxMicromeshReason();
-      ImGuiH::tooltip(tooltipMessage.c_str(), true);
-    }
-    else
-    {
-#endif
-      ImGui::TextColored(warningColor, "Missing " VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME " to raytrace micromap");
-#if 1  // #!584
-    }
-#endif
+    ImGui::TextColored(warningColor, "Missing " VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME " to raytrace micromap");
   }
 
   if(_v->m_driverMaxSubdivLevel > 0U && scene->stats() && scene->stats()->maxBarySubdivLevel > _v->m_driverMaxSubdivLevel)

@@ -986,7 +986,7 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
 
   const std::unique_ptr<micromesh_tool::ToolScene>&                tool_scene    = toolbox_scene->getToolScene();
   const std::unique_ptr<ToolboxSceneVk>&                           tool_scene_vk = toolbox_scene->getToolSceneVK();
-  const std::vector<micromesh_tool::ToolScene::PrimitiveInstance>& prim_inst     = tool_scene->getPrimitiveInstances();
+  meshops::ArrayView<micromesh_tool::ToolScene::PrimitiveInstance> prim_inst     = tool_scene->instances();
   const std::vector<std::unique_ptr<micromesh_tool::ToolMesh>>&    meshes        = tool_scene->meshes();
   const nvvkhl::PipelineContainer&                                 pipeline      = toolbox_scene->getRasterPipeline();
 
