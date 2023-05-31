@@ -1,0 +1,68 @@
+#usda 1.0
+(
+    subLayers = [
+        @usd/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName      = "nvMicromesh"
+        string libraryPath      = "."
+        string libraryPrefix    = "NvMicromesh"
+        bool skipCodeGeneration = false
+    }
+) {
+}
+
+class "DisplacementMicromapAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        token apiSchemaType = "singleApply"
+        string className = "DisplacementMicromapAPI"
+    }
+    doc = """DisplacementMicromapAPI Schema"""
+)
+{
+    uint     primvars:micromesh:version(doc = "")
+    bool     primvars:micromesh:compressed(doc = "true if micromap dat is compressed")
+    float    primvars:micromesh:floatScale(doc = "global scale")
+    float    primvars:micromesh:floatBias(doc = "global bias")
+    uint     primvars:micromesh:minSubdivLevel(doc = "minimum subdivision level in the micromap")
+    uint     primvars:micromesh:maxSubdivLevel(doc = "maximum subdivision level in the micromap")
+    float3[] primvars:micromesh:directions(doc = "per-vertex displacement directions")
+    float2[] primvars:micromesh:directionBounds(doc = "per-vertex displacement direction bounds")
+
+    uint     primvars:micromesh:triangleMappingsFormat(doc = "")
+    uint     primvars:micromesh:triangleMappingsCount(doc = "")
+    uint     primvars:micromesh:triangleMappingsByteSize(doc = "")
+    uchar[]  primvars:micromesh:triangleMappings(doc = "maps triangle ID to base primitive (unpack per format)")
+
+    uint     primvars:micromesh:valueLayout(doc = "")
+    uint     primvars:micromesh:valueFrequency(doc = "")
+    uint     primvars:micromesh:valueFormat(doc = "")
+    uint     primvars:micromesh:valueCount(doc = "")
+    uint     primvars:micromesh:valueByteSize(doc = "")
+    uchar[]  primvars:micromesh:values(doc = "per-vertex displacement values")
+
+    uint     primvars:micromesh:triangleFlagsFormat(doc = "")
+    uint     primvars:micromesh:triangleFlagsCount(doc = "")
+    uint     primvars:micromesh:triangleFlagsByteSize(doc = "")
+    uchar[]  primvars:micromesh:triangleFlags(doc = "per-triangle edge flags")
+
+    uint[]   primvars:micromesh:triangleValueOffsets(doc = "")
+    uint[]   primvars:micromesh:triangleSubdivLevels(doc = "")
+    uint[]   primvars:micromesh:triangleBlockFormats(doc = "")
+
+    uint[]   primvars:micromesh:histogramCounts(doc = "required for compressed data")
+    uint[]   primvars:micromesh:histogramSubdivLevels(doc = "required for compressed data")
+    uint[]   primvars:micromesh:histogramBlockFormats(doc = "required for compressed data")
+
+    uint     primvars:micromesh:triangleMinMaxsFormat(doc = "optional")
+    uint     primvars:micromesh:triangleMinMaxsCount(doc = "optional")
+    uint     primvars:micromesh:triangleMinMaxsByteSize(doc = "optional")
+    uchar[]  primvars:micromesh:triangleMinMaxs(doc = "optional")
+
+    asset    primvars:micromesh:quaternionMap(doc = "quaternion map texture")
+    asset    primvars:micromesh:offsetMap(doc = "offset map texture")
+}

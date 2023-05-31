@@ -19,7 +19,7 @@ bool UiStatistics::onUI(const micromesh_tool::ToolScene* scene)
 {
   using PE = ImGuiH::PropertyEditor;
 
-  if(scene == nullptr || !scene->valid())
+  if(scene == nullptr)
   {
     ImGui::Text("No current scene");
     return false;

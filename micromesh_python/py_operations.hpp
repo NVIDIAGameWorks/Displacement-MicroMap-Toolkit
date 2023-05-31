@@ -353,8 +353,8 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
 
 
   // Create normal map texture
-  int outputNormalMapOutputIndex = -1;
-  if(!bakerInput.normalMapFilepath.empty() && baseMeshIncludesTexCoords)
+  int outputQuaternionMapOutputIndex = -1;
+  if(!bakerInput.quaternionMapFilepath.empty() && baseMeshIncludesTexCoords)
   {
       meshops::OpBake_resamplerInput input;
 
@@ -364,9 +364,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
       meshops::TextureConfig inputConfig;
       inputConfig.baseFormat       = micromesh::Format::eR32_sfloat;
       inputConfig.internalFormatVk    = VK_FORMAT_R32_SFLOAT;
-      inputConfig.width            = uint32_t(bakerInput.normalMapResolution);
-      inputConfig.height              = uint32_t(bakerInput.normalMapResolution);
-      inputConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.normalMapResolution))) + 1;
+      inputConfig.width            = uint32_t(bakerInput.quaternionMapResolution);
+      inputConfig.height              = uint32_t(bakerInput.quaternionMapResolution);
+      inputConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.quaternionMapResolution))) + 1;
 
       meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingSource, inputConfig, &fillValue));
       if(!meshopsTextures.back()->valid())
@@ -383,9 +383,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
       meshops::TextureConfig distanceConfig;
       distanceConfig.baseFormat = micromesh::Format::eR32_sfloat;
       distanceConfig.internalFormatVk = VK_FORMAT_R32_SFLOAT;
-      distanceConfig.width      = uint32_t(bakerInput.normalMapResolution);
-      distanceConfig.height     = uint32_t(bakerInput.normalMapResolution);
-      distanceConfig.mips       = static_cast<uint32_t>(std::floor(std::log2(bakerInput.normalMapResolution))) + 1;
+      distanceConfig.width      = uint32_t(bakerInput.quaternionMapResolution);
+      distanceConfig.height     = uint32_t(bakerInput.quaternionMapResolution);
+      distanceConfig.mips       = static_cast<uint32_t>(std::floor(std::log2(bakerInput.quaternionMapResolution))) + 1;
 
       meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingDistance, distanceConfig, &fillInitDist));
       if(!meshopsTextures.back()->valid())
@@ -400,9 +400,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
       meshops::TextureConfig quaternionMapConfig;
       quaternionMapConfig.baseFormat  = micromesh::Format::eRGBA8_unorm;
       quaternionMapConfig.internalFormatVk = VK_FORMAT_R8G8B8A8_UNORM;
-      quaternionMapConfig.width      = uint32_t(bakerInput.normalMapResolution);
-      quaternionMapConfig.height     = uint32_t(bakerInput.normalMapResolution);
-      quaternionMapConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.normalMapResolution))) + 1;
+      quaternionMapConfig.width      = uint32_t(bakerInput.quaternionMapResolution);
+      quaternionMapConfig.height     = uint32_t(bakerInput.quaternionMapResolution);
+      quaternionMapConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.quaternionMapResolution))) + 1;
 
       meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingDestination, quaternionMapConfig, &fillValue));
       if(!meshopsTextures.back()->valid())
@@ -410,14 +410,14 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
           throw std::runtime_error("Error: meshopsTextureCreate() failed to create quaternion output texture\n");
       }
 
-      outputNormalMapOutputIndex = (int)resamplerOutput.size();
+      outputQuaternionMapOutputIndex = (int)resamplerOutput.size();
       resamplerOutput.push_back(*meshopsTextures.back());
   }
 
 
   // Create uv remap texture
-  int outputUvRemapOutputIndex = -1;
-  if(!bakerInput.uvRemapFilepath.empty() && baseMeshIncludesTexCoords)
+  int outputOffsetMapOutputIndex = -1;
+  if(!bakerInput.offsetMapFilepath.empty() && baseMeshIncludesTexCoords)
   {
     meshops::OpBake_resamplerInput input;
 
@@ -427,9 +427,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
     meshops::TextureConfig inputConfig;
     inputConfig.baseFormat       = micromesh::Format::eR32_sfloat;
     inputConfig.internalFormatVk = VK_FORMAT_R32_SFLOAT;
-    inputConfig.width            = uint32_t(bakerInput.uvRemapResolution);
-    inputConfig.height           = uint32_t(bakerInput.uvRemapResolution);
-    inputConfig.mips             = static_cast<uint32_t>(std::floor(std::log2(bakerInput.uvRemapResolution))) + 1;
+    inputConfig.width            = uint32_t(bakerInput.offsetMapResolution);
+    inputConfig.height           = uint32_t(bakerInput.offsetMapResolution);
+    inputConfig.mips             = static_cast<uint32_t>(std::floor(std::log2(bakerInput.offsetMapResolution))) + 1;
 
     meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingSource,
                                                                                 inputConfig, &fillValue));
@@ -447,9 +447,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
     meshops::TextureConfig distanceConfig;
     distanceConfig.baseFormat       = micromesh::Format::eR32_sfloat;
     distanceConfig.internalFormatVk = VK_FORMAT_R32_SFLOAT;
-    distanceConfig.width            = uint32_t(bakerInput.uvRemapResolution);
-    distanceConfig.height           = uint32_t(bakerInput.uvRemapResolution);
-    distanceConfig.mips             = static_cast<uint32_t>(std::floor(std::log2(bakerInput.uvRemapResolution))) + 1;
+    distanceConfig.width            = uint32_t(bakerInput.offsetMapResolution);
+    distanceConfig.height           = uint32_t(bakerInput.offsetMapResolution);
+    distanceConfig.mips             = static_cast<uint32_t>(std::floor(std::log2(bakerInput.offsetMapResolution))) + 1;
 
     meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingDistance,
                                                                                 distanceConfig, &fillInitDist));
@@ -465,9 +465,9 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
     meshops::TextureConfig offsetMapConfig;
     offsetMapConfig.baseFormat           = micromesh::Format::eRGBA16_unorm;
     offsetMapConfig.internalFormatVk     = VK_FORMAT_R16G16B16A16_UNORM;
-    offsetMapConfig.width                = uint32_t(bakerInput.uvRemapResolution);
-    offsetMapConfig.height               = uint32_t(bakerInput.uvRemapResolution);
-    offsetMapConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.uvRemapResolution))) + 1;
+    offsetMapConfig.width                = uint32_t(bakerInput.offsetMapResolution);
+    offsetMapConfig.height               = uint32_t(bakerInput.offsetMapResolution);
+    offsetMapConfig.mips = static_cast<uint32_t>(std::floor(std::log2(bakerInput.offsetMapResolution))) + 1;
 
     meshopsTextures.push_back(std::make_unique<micromesh_tool::MeshopsTexture>(context, meshops::eTextureUsageBakerResamplingDestination, offsetMapConfig, &fillValue));
     if(!meshopsTextures.back()->valid())
@@ -475,7 +475,7 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
       throw std::runtime_error("Error: meshopsTextureCreate() failed to create offset output texture\n");
     }
 
-    outputUvRemapOutputIndex = (int)resamplerOutput.size();
+    outputOffsetMapOutputIndex = (int)resamplerOutput.size();
     resamplerOutput.push_back(*meshopsTextures.back());
   }
 
@@ -743,40 +743,41 @@ void bake(meshops::Context context, PyBakerInput& bakerInput, PyMicromeshData& b
   }
 
   // Write out quat map
-  if(!bakerInput.normalMapFilepath.empty() && outputNormalMapOutputIndex >= 0
-     && static_cast<size_t>(outputNormalMapOutputIndex) < resamplerOutput.size())
+  if(!bakerInput.quaternionMapFilepath.empty() && outputQuaternionMapOutputIndex >= 0
+     && static_cast<size_t>(outputQuaternionMapOutputIndex) < resamplerOutput.size())
   {
-    meshops::Texture tex = resamplerOutput[outputNormalMapOutputIndex];
+    meshops::Texture tex = resamplerOutput[outputQuaternionMapOutputIndex];
     
     size_t dataSize = meshops::meshopsTextureGetMipDataSize(tex, 0);
     std::vector<uint8_t> data;
     data.resize(dataSize);
     meshops::meshopsTextureToData(context, tex, dataSize, &data[0]);
 
-    if(!imageio::writePNG(bakerInput.normalMapFilepath.c_str(), bakerInput.normalMapResolution,
-                          bakerInput.normalMapResolution, &data[0], VK_FORMAT_R8G8B8A8_UNORM))
+    if(!imageio::writePNG(bakerInput.quaternionMapFilepath.c_str(), bakerInput.quaternionMapResolution,
+                          bakerInput.quaternionMapResolution, &data[0], VK_FORMAT_R8G8B8A8_UNORM))
     {
       std::stringstream s;
-      s << "Error: failed to write normal map (" << bakerInput.normalMapFilepath << ")";
+      s << "Error: failed to write normal map (" << bakerInput.quaternionMapFilepath << ")";
       throw std::runtime_error(s.str());
     }
   }
 
   // Write out undistort map
-  if(!bakerInput.uvRemapFilepath.empty() && outputUvRemapOutputIndex >= 0 && outputUvRemapOutputIndex < resamplerOutput.size())
+  if(!bakerInput.offsetMapFilepath.empty() && outputOffsetMapOutputIndex >= 0
+     && static_cast<size_t>(outputOffsetMapOutputIndex) < resamplerOutput.size())
   {
-    meshops::Texture tex = resamplerOutput[outputUvRemapOutputIndex];
+    meshops::Texture tex = resamplerOutput[outputOffsetMapOutputIndex];
 
     size_t               dataSize = meshops::meshopsTextureGetMipDataSize(tex, 0);
     std::vector<uint8_t> data;
     data.resize(dataSize);
     meshops::meshopsTextureToData(context, tex, dataSize, &data[0]);
 
-    if(!imageio::writePNG(bakerInput.uvRemapFilepath.c_str(), bakerInput.uvRemapResolution,
-                          bakerInput.uvRemapResolution, &data[0], VK_FORMAT_R16G16B16A16_UNORM))
+    if(!imageio::writePNG(bakerInput.offsetMapFilepath.c_str(), bakerInput.offsetMapResolution,
+                          bakerInput.offsetMapResolution, &data[0], VK_FORMAT_R16G16B16A16_UNORM))
     {
       std::stringstream s;
-      s << "Error: failed to write UV remap/undistort/offset texture (" << bakerInput.uvRemapFilepath << ")";
+      s << "Error: failed to write UV remap/undistort/offset texture (" << bakerInput.offsetMapFilepath << ")";
       throw std::runtime_error(s.str());
     }
   }
@@ -853,8 +854,6 @@ void remesh(meshops::Context context, PyMesh& inputMesh, PyRemesherSettings& set
 
   inputMesh.toMeshView(meshView);
 
-  bool baseMeshIncludesTexCoords = meshView.vertexTexcoords0.size() > 0;
-
   micromesh_tool::GenerateImportanceOperator generateImportanceOperator(context);
 
   micromesh_tool::RemeshingOperator remeshingOperator(context);
@@ -873,8 +872,6 @@ void remesh(meshops::Context context, PyMesh& inputMesh, PyRemesherSettings& set
 
   // Allocate storage for output attributes, if missing
   const meshops::MeshAttributeFlags combinedMeshAttributes = (~meshView.getMeshAttributeFlags()) & requiredMeshAttributes;
-  bool hadDirections = ((meshView.getMeshAttributeFlags() & meshops::eMeshAttributeVertexDirectionBit)
-                        == meshops::eMeshAttributeVertexDirectionBit);
   meshView.resize(combinedMeshAttributes, meshView.triangleCount(), meshView.vertexCount());
 
   {
@@ -1073,11 +1070,6 @@ void preTessellate(meshops::Context context, PyMesh& inputMesh, PyPreTessellator
   meshops::ResizableMeshView  meshView(mesh, makeResizableMeshViewCallback(mesh));
 
   inputMesh.toMeshView(meshView);
-
-  bool baseMeshIncludesTexCoords = meshView.vertexTexcoords0.size() > 0;
-
-  size_t totalTriangles    = 0;
-  size_t totalNewTriangles = 0;
 
   meshops::MeshTopologyData meshTopology;
   if(micromesh_tool::buildTopologyData(context, meshView, meshTopology) != micromesh::Result::eSuccess)

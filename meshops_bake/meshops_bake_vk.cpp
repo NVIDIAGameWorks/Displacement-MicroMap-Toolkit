@@ -19,14 +19,16 @@
 #include <meshops_internal/pn_triangles.hpp>
 #include <meshops_internal/umesh_util.hpp>
 #include <meshops/bias_scale.hpp>
+#include "meshops/meshops_mesh_view.h"
 #include "nvvk/specialization.hpp"
 #include <glm/gtx/hash.hpp>
 #include <nvmath/nvmath_types.h>
 #include <nvh/parallel_work.hpp>
-#include <scoped_timer.hpp>
+#include <nvh/timesampler.hpp>
 #include <nvvk/buffers_vk.hpp>
 #include <nvvk/shaders_vk.hpp>
 #include <nvvk/pipeline_vk.hpp>
+#include <nvh/alignment.hpp>
 #include <vector>
 
 #include "_autogen/bary_trace.comp.h"
@@ -37,47 +39,18 @@ namespace meshops {
 
 using namespace glsl_shared;
 
+static bool getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs, nvmath::vec2f& globalMinMax, bool filterZeroToOne, const uint32_t maxFilterWarnings);
+
 template <class ArrayInfoType>
 ArrayView<typename ArrayInfoType::value_type> makeArrayView(const ArrayInfoType& arrayInfo)
 {
   return ArrayView(reinterpret_cast<typename ArrayInfoType::value_type*>(arrayInfo.data), arrayInfo.count, arrayInfo.byteStride);
 }
 
-static bool getMemoryUsageVk(VkPhysicalDevice physicalDevice, VkDeviceSize* budget, VkDeviceSize* usage)
-{
-  VkPhysicalDeviceMemoryBudgetPropertiesEXT memoryBudgetProperties = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-  VkPhysicalDeviceMemoryProperties2 memoryProperties2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &memoryBudgetProperties};
-  vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &memoryProperties2);
-  uint32_t heapIndex = (uint32_t)-1;
-  for(uint32_t memoryType = 0; memoryType < memoryProperties2.memoryProperties.memoryTypeCount; memoryType++)
-  {
-    if(memoryProperties2.memoryProperties.memoryTypes[memoryType].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    {
-      heapIndex = memoryProperties2.memoryProperties.memoryTypes[memoryType].heapIndex;
-      break;
-    }
-  }
-  if(heapIndex == (uint32_t)-1)
-  {
-    return false;
-  }
-  *budget = memoryBudgetProperties.heapBudget[heapIndex];
-  *usage  = memoryBudgetProperties.heapUsage[heapIndex];
-  return true;
-}
-
-BakerVK::BakerVK(micromesh::OpContext micromeshContext, meshops::ContextVK& vkContext, unsigned int threadCount)
+BakerVK::BakerVK(micromesh::OpContext micromeshContext, meshops::ContextVK& vkContext)
     : m_micromeshContext(micromeshContext)
-    , m_alloc(*vkContext.resAllocator)
-    , m_threadCount(threadCount)
+    , m_vk(vkContext)
 {
-  nvvk::Context& ctx = *vkContext.context;
-  m_device           = ctx.m_device;
-  m_physicalDevice   = ctx.m_physicalDevice;
-  m_queueT           = vkContext.queueT;
-  m_queueC           = vkContext.queueC;
-  m_queueGCT         = vkContext.queueGCT;
-  m_rtBuilder.setup(m_device, &m_alloc, m_queueC.familyIndex);
 }
 
 BakerVK::~BakerVK()
@@ -95,181 +68,266 @@ bool BakerVK::bakeAndResample(const meshops::OpBake_input&              input,
 {
   LOGI("Batch %u/%u\n", batch.batchIndex + 1, batch.totalBatches);
 
-  if(!createVkHighGeometry(input, input.referenceMeshView, batch))
+  BakerReferenceScene referenceScene;
+  if(!referenceScene.create(m_micromeshContext, m_vk, input, input.referenceMeshView, batch))
   {
-    LOGE("createVkHighGeometry() failed\n");
+    LOGE("Error: Failed to create reference mesh geometry\n");
     return false;
   }
 
-  // Create pipeline and descriptor set
-  createBakerPipeline();
+  nvvk::Buffer sceneDescBuf;
+  {
+    nvvk::CommandPool cmdPool(m_vk.context->m_device, m_vk.queueT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                              m_vk.queueT.queue);
+    VkCommandBuffer   cmdBuf = cmdPool.createCommandBuffer();
 
+    SceneDescription sceneDesc;
+    sceneDesc.baseMeshAddress = nvvk::getBufferDeviceAddress(m_vk.context->m_device, m_baseVk.primInfoBuf.buffer);
+    sceneDesc.referenceMeshAddress =
+        nvvk::getBufferDeviceAddress(m_vk.context->m_device, referenceScene.referenceVk.primInfoBuf.buffer);
+    sceneDesc.distancesAddress       = nvvk::getBufferDeviceAddress(m_vk.context->m_device, m_distanceBuf.buffer);
+    sceneDesc.trianglesAddress       = nvvk::getBufferDeviceAddress(m_vk.context->m_device, m_trianglesBuf.buffer);
+    sceneDesc.triangleMinMaxsAddress = nvvk::getBufferDeviceAddress(m_vk.context->m_device, m_triangleMinMaxBuf.buffer);
+    for(size_t levelIdx = 0; levelIdx < m_baryCoordBuf.size(); levelIdx++)
+      sceneDesc.baryCoordsAddress[levelIdx] =
+          nvvk::getBufferDeviceAddress(m_vk.context->m_device, m_baryCoordBuf[levelIdx].buffer);
+
+    sceneDescBuf = m_vk.resAllocator->createBuffer(cmdBuf, sizeof(SceneDescription), &sceneDesc,
+                                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+
+    cmdPool.submitAndWait(cmdBuf);
+    m_vk.resAllocator->finalizeAndReleaseStaging();
+  }
+
+  // Create pipeline and descriptor set
+  BakerPipeline bakerPipeline;
+  bakerPipeline.create(m_vk.context->m_device, sceneDescBuf.buffer, referenceScene.rtBuilder.getAccelerationStructure());
+
+  ResamplerPipeline resamplerPipeline;
   if(resample && !outputTextureInfo.empty())
-    createResamplerPipeline(inputTextures, outputTextures, distanceTextures);
+    resamplerPipeline.create(m_vk.context->m_device, sceneDescBuf.buffer, referenceScene.rtBuilder.getAccelerationStructure(),
+                             inputTextures, outputTextures, distanceTextures);
 
   VkDeviceSize budget, usage;
-  getMemoryUsageVk(m_physicalDevice, &budget, &usage);
-  LOGI("Memory usage: %.2f/%.2f MB\n", (double)usage / (1024.0 * 1024.0), (double)budget / (1024.0 * 1024.0));
+  getMemoryUsageVk(m_vk.context->m_physicalDevice, &budget, &usage);
+  LOGI("  Memory usage: %.2f/%.2f MB\n", (double)usage / (1024.0 * 1024.0), (double)budget / (1024.0 * 1024.0));
 
   // Run compute shader
-  runComputePass(input, batch.batchIndex + 1 == batch.totalBatches);
+  bakerPipeline.run(m_vk, input, m_push, batch.batchIndex + 1 == batch.totalBatches);
 
   // Resample all textures, keeping the minimum hits for this batch
   if(resample && !outputTextureInfo.empty())
   {
-    runResampler(input, outputTextureInfo);
+    resamplerPipeline.run(m_vk, input, outputTextureInfo, m_push, m_triangleMinMaxBuf);
   }
 
-  destroyBakerPipeline();
+  bakerPipeline.destroy(m_vk.context->m_device);
 
   if(resample && !outputTextureInfo.empty())
-    destroyResamplerPipeline();
+    resamplerPipeline.destroy(m_vk.context->m_device);
 
-  destroyVkHighGeometry();
+  m_vk.resAllocator->destroy(sceneDescBuf);
+  referenceScene.destroy(m_vk.resAllocator);
   return true;
 }
 
 //--------------------------------------------------------------------------------------------------
 // Creating Vulkan resources
 //
-void BakerVK::createVkResources(const meshops::OpBake_input& info,
-                                const meshops::MeshView&     lowScene,
-                                const meshops::MeshView&     highScene,
-                                MutableArrayView<float>      distances)
+void BakerVK::create(const meshops::OpBake_input& input, MutableArrayView<float> distances)
 {
-  {
-    ScopedTimer t("Create VK Resources\n");
+  nvh::ScopedTimer         t("Create Baker VK Resources\n");
+  const meshops::MeshView& baseMeshView = input.baseMeshView;
 
-    m_push.maxDistance             = info.settings.maxTraceLength;
-    m_push.replaceDirectionLength  = info.settings.maxTraceLength != 0.0f;
-    m_push.highMeshHasDisplacement = info.referenceMeshHeightmap.texture != nullptr;
-    m_push.uniDirectional          = info.settings.uniDirectional ? 1 : 0;
-    m_push.maxDistanceFactor       = info.settings.maxDistanceFactor;
+  m_push.maxDistance             = input.settings.maxTraceLength;
+  m_push.replaceDirectionLength  = input.settings.maxTraceLength != 0.0f;
+  m_push.highMeshHasDisplacement = input.referenceMeshHeightmap.texture != nullptr;
+  m_push.uniDirectional          = input.settings.uniDirectional ? 1 : 0;
+  m_push.maxDistanceFactor       = input.settings.maxDistanceFactor;
 
-    VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
-    // Creating the Vulkan resources of the scene
-    nvvk::CommandPool cmdPool(m_device, m_queueT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, m_queueT.queue);
-    VkCommandBuffer   cmdBuf = cmdPool.createCommandBuffer();
-
-    // Direction bounds are fitted to the displacements during baking.
-    m_push.hasDirectionBounds = !lowScene.vertexDirectionBounds.empty();
-    if(m_push.hasDirectionBounds)
-    {
-      VkDeviceSize boundsTotalBytes = lowScene.vertexDirectionBounds.size() * sizeof(lowScene.vertexDirectionBounds[0]);
-      m_directionBoundsBuf = m_alloc.createBuffer(boundsTotalBytes, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-      {
-        nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(m_alloc.map(m_directionBoundsBuf));
-        std::copy(lowScene.vertexDirectionBounds.begin(), lowScene.vertexDirectionBounds.end(), directionBounds);
-        m_alloc.unmap(m_directionBoundsBuf);
-      }
-      m_directionBoundsOrigBuf = m_alloc.createBuffer(boundsTotalBytes, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-      {
-        nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(m_alloc.map(m_directionBoundsOrigBuf));
-        std::copy(lowScene.vertexDirectionBounds.begin(), lowScene.vertexDirectionBounds.end(), directionBounds);
-        m_alloc.unmap(m_directionBoundsOrigBuf);
-      }
-    }
-
-    assert(!lowScene.vertexDirections.empty());
-    createVertexBuffer(cmdBuf, lowScene, m_lowVk);
-
-    // Initialize distances to the max float value as a "no hit" marker.
-    // This way we can take the min() of multiple traces when baking geometry in batches.
-    // This is undone later, converting any remaining values back to zero displacement.
-    std::fill(distances.begin(), distances.end(), std::numeric_limits<float>::max());
-
-    // Initialize min/max displacement values to float [max, min]. These are uploaded and used during tracing to compute
-    // per-vertex direction bounds. m_microMesh.baryBaker() recomputes them offline so they are not copied back to this
-    // array.
-    std::vector<nvmath::vec2f> minMaxPairs(lowScene.triangleCount());
-    std::fill(minMaxPairs.begin(), minMaxPairs.end(),
-              nvmath::vec2f(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()));
-
-    // Create a buffer holding all distances
-    std::vector<Triangle> triangles(lowScene.triangleCount());
-    for(size_t i = 0; i < triangles.size(); ++i)
-    {
-      triangles[i].meshTriangle = static_cast<uint32_t>(i);
-      triangles[i].subdivLevel =
-          lowScene.triangleSubdivisionLevels.empty() ? info.settings.level : lowScene.triangleSubdivisionLevels[i];
-      triangles[i].valueCount = bary::baryValueFrequencyGetCount(bary::ValueFrequency::ePerVertex, triangles[i].subdivLevel);
-      triangles[i].valueFirst = i == 0 ? 0 : triangles[i - 1].valueFirst + triangles[i - 1].valueCount;
-    }
-    m_distanceBuf = m_alloc.createBuffer(cmdBuf, distances.size() * sizeof(distances[0]), distances.data(), bufferUsage,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-    m_trianglesBuf      = m_alloc.createBuffer(cmdBuf, triangles, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-    m_triangleMinMaxBuf = m_alloc.createBuffer(cmdBuf, minMaxPairs, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-
-    // Buffers holding the barycentric values for all levels
-    // FIXME: bmap seems to have an extra unused level defined
-    assert(info.settings.level <= MAX_SUBDIV_LEVELS);
-    baryutils::BaryLevelsMap bmap;
-    bmap.initialize(bary::ValueLayout::eTriangleBirdCurve, info.settings.level);
-    int maxSubdivLevels = std::min(bmap.getNumLevels(), uint32_t(MAX_SUBDIV_LEVELS));
-    m_baryCoordBuf.resize(maxSubdivLevels);
-    for(int levelIdx = 0; levelIdx < maxSubdivLevels; levelIdx++)
-    {
-      const baryutils::BaryLevelsMap::Level& level         = bmap.getLevel(levelIdx);
-      uint32_t                               numBaryCoords = static_cast<int>(level.coordinates.size());
-      m_maxNumBaryCoord                                    = std::max(numBaryCoords, m_maxNumBaryCoord);
-      std::vector<nvmath::vec3f> baryCoord(numBaryCoords);
-      for(uint32_t i = 0; i < numBaryCoords; i++)
-      {
-        level.getFloatCoord(i, &baryCoord[i].x);
-      }
-      m_baryCoordBuf[levelIdx] = m_alloc.createBuffer(cmdBuf, baryCoord, bufferUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    }
-
-    cmdPool.submitAndWait(cmdBuf);
-    m_alloc.finalizeAndReleaseStaging();
-  }
-}
-
-
-bool BakerVK::createVkHighGeometry(const meshops::OpBake_input& info, const meshops::MeshView& highScene, const GeometryBatch& batch)
-{
-  nvvk::CommandPool cmdPool(m_device, m_queueT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, m_queueT.queue);
+  // Creating the Vulkan resources of the scene
+  nvvk::CommandPool cmdPool(m_vk.context->m_device, m_vk.queueT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                            m_vk.queueT.queue);
   VkCommandBuffer   cmdBuf = cmdPool.createCommandBuffer();
 
-  if(info.referenceMeshHeightmap.texture)
+  // Direction bounds are fitted to the displacements during baking.
+  m_push.hasDirectionBounds = !baseMeshView.vertexDirectionBounds.empty();
+
+  assert(!baseMeshView.vertexDirections.empty());
+  m_baseVk.create(m_vk.resAllocator, cmdBuf, baseMeshView, m_push.hasDirectionBounds);
+
+  // Initialize distances to the max float value as a "no hit" marker.
+  // This way we can take the min() of multiple traces when baking geometry in batches.
+  // This is undone later, converting any remaining values back to zero displacement.
+  std::fill(distances.begin(), distances.end(), std::numeric_limits<float>::max());
+
+  // Initialize min/max displacement values to float [max, min]. These are uploaded and used during tracing to compute
+  // per-vertex direction bounds. m_microMesh.baryBaker() recomputes them offline so they are not copied back to this
+  // array.
+  std::vector<nvmath::vec2f> minMaxPairs(baseMeshView.triangleCount());
+  std::fill(minMaxPairs.begin(), minMaxPairs.end(),
+            nvmath::vec2f(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()));
+
+  // Create a buffer holding all distances
+  std::vector<Triangle> triangles(baseMeshView.triangleCount());
+  for(size_t i = 0; i < triangles.size(); ++i)
   {
-    if(!createTessellatedVertexBuffer(info, cmdBuf, highScene, m_highVk, batch, info.referenceMeshHeightmap.maxSubdivLevel))
+    triangles[i].meshTriangle = static_cast<uint32_t>(i);
+    triangles[i].subdivLevel =
+        baseMeshView.triangleSubdivisionLevels.empty() ? input.settings.level : baseMeshView.triangleSubdivisionLevels[i];
+    triangles[i].valueCount = bary::baryValueFrequencyGetCount(bary::ValueFrequency::ePerVertex, triangles[i].subdivLevel);
+    triangles[i].valueFirst = i == 0 ? 0 : triangles[i - 1].valueFirst + triangles[i - 1].valueCount;
+  }
+  m_distanceBuf  = m_vk.resAllocator->createBuffer(cmdBuf, distances.size() * sizeof(distances[0]), distances.data(),
+                                                   bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+  m_trianglesBuf = m_vk.resAllocator->createBuffer(cmdBuf, triangles, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+  m_triangleMinMaxBuf = m_vk.resAllocator->createBuffer(cmdBuf, minMaxPairs, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+
+  // Buffers holding the barycentric values for all levels
+  assert(input.settings.level < BAKER_NUM_SUBDIV_LEVEL_MAPS);
+  baryutils::BaryLevelsMap bmap;
+  bmap.initialize(bary::ValueLayout::eTriangleBirdCurve, input.settings.level);
+  int maxSubdivLevels = std::min(bmap.getNumLevels(), uint32_t(BAKER_NUM_SUBDIV_LEVEL_MAPS));
+  m_baryCoordBuf.resize(maxSubdivLevels);
+  for(int levelIdx = 0; levelIdx < maxSubdivLevels; levelIdx++)
+  {
+    const baryutils::BaryLevelsMap::Level& level         = bmap.getLevel(levelIdx);
+    uint32_t                               numBaryCoords = static_cast<int>(level.coordinates.size());
+    std::vector<nvmath::vec3f>             baryCoord(numBaryCoords);
+    for(uint32_t i = 0; i < numBaryCoords; i++)
+    {
+      level.getFloatCoord(i, &baryCoord[i].x);
+    }
+    m_baryCoordBuf[levelIdx] = m_vk.resAllocator->createBuffer(cmdBuf, baryCoord, bufferUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  }
+
+  cmdPool.submitAndWait(cmdBuf);
+  m_vk.resAllocator->finalizeAndReleaseStaging();
+}
+
+uint64_t BakerVK::estimateBaseGpuMemory(uint64_t distances, uint64_t triangles, uint64_t vertices, bool requireDirectionBounds)
+{
+  // A conservative guess for allocation granularity
+  const uint64_t alignment = 4096;
+
+  // Persistent gpu memory used between batches
+  uint64_t result = 0;
+  result += nvh::align_up(sizeof(float) * distances, alignment);                  // m_distanceBuf
+  result += nvh::align_up(sizeof(glsl_shared::Triangle) * triangles, alignment);  // m_trianglesBuf
+  result += nvh::align_up(sizeof(nvmath::vec2f) * triangles, alignment);          // m_triangleMinMaxBuf
+  result += BakerMeshVK::estimateGpuMemory(triangles, vertices, requireDirectionBounds);
+
+  return result;
+}
+
+uint64_t BakerVK::estimateBatchGpuMemory(VkDevice device, uint64_t triangles, uint64_t vertices)
+{
+  uint64_t result = BakerReferenceScene::estimateGpuMemory(device, triangles, vertices);
+
+  // Magic 100MB constant overhead.
+  // TODO: allocate shader modules earlier so that they are not part of each batch.
+  result += 100 * 1024 * 1024;
+
+  return result;
+}
+
+bool BakerReferenceScene::create(micromesh::OpContext         micromeshContext,
+                                 meshops::ContextVK&          vk,
+                                 const meshops::OpBake_input& input,
+                                 const meshops::MeshView&     meshView,
+                                 const GeometryBatch&         batch)
+{
+  rtBuilder.setup(vk.context->m_device, vk.resAllocator, vk.queueC.familyIndex);
+
+  nvvk::CommandPool cmdPool(vk.context->m_device, vk.queueT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, vk.queueT.queue);
+  VkCommandBuffer cmdBuf = cmdPool.createCommandBuffer();
+
+  if(input.referenceMeshHeightmap.texture)
+  {
+    if(!referenceVk.createTessellated(micromeshContext, vk.resAllocator, input, cmdBuf, meshView, batch,
+                                      input.referenceMeshHeightmap.maxSubdivLevel))
       return false;
   }
   else
   {
-    createVertexBuffer(cmdBuf, highScene, m_highVk);
-    LOGI("Batch high nb triangles: %zu\n", m_highVk.totalTriangles);
+    referenceVk.create(vk.resAllocator, cmdBuf, meshView, false);
+    LOGI("Batch reference triangles: %u\n", referenceVk.numTriangles);
   }
 
-  SceneDescription sceneDesc;
-  sceneDesc.primLoInfoAddress      = nvvk::getBufferDeviceAddress(m_device, m_lowVk.primInfoBuf.buffer);
-  sceneDesc.primHiInfoAddress      = nvvk::getBufferDeviceAddress(m_device, m_highVk.primInfoBuf.buffer);
-  sceneDesc.distancesAddress       = nvvk::getBufferDeviceAddress(m_device, m_distanceBuf.buffer);
-  sceneDesc.trianglesAddress       = nvvk::getBufferDeviceAddress(m_device, m_trianglesBuf.buffer);
-  sceneDesc.triangleMinMaxsAddress = nvvk::getBufferDeviceAddress(m_device, m_triangleMinMaxBuf.buffer);
-  for(size_t levelIdx = 0; levelIdx < m_baryCoordBuf.size(); levelIdx++)
-    sceneDesc.baryCoordsAddress[levelIdx] = nvvk::getBufferDeviceAddress(m_device, m_baryCoordBuf[levelIdx].buffer);
-
-  m_sceneDescBuf = m_alloc.createBuffer(cmdBuf, sizeof(SceneDescription), &sceneDesc,
-                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-
   cmdPool.submitAndWait(cmdBuf);
-  m_alloc.finalizeAndReleaseStaging();
+  vk.resAllocator->finalizeAndReleaseStaging();
 
-  // Create BVH of high mesh
-  createBottomLevelAS(highScene, m_highVk, batch);
-  createTopLevelAS(info, highScene, batch);
+  // Create BVH of reference mesh
+  createBottomLevelAS(vk.context->m_device);
+  createTopLevelAS(input);
 
   return true;
 }
 
-void BakerVK::destroyVkHighGeometry()
+void BakerReferenceScene::destroy(nvvk::ResourceAllocator* alloc)
 {
-  m_alloc.destroy(m_sceneDescBuf);
-  m_rtBuilder.destroy();
-  destroyVkScene(m_highVk);
+  rtBuilder.destroy();
+  referenceVk.destroy(alloc);
+}
+
+uint64_t BakerReferenceScene::estimateGpuMemory(VkDevice device, uint64_t triangles, uint64_t vertices)
+{
+  uint64_t result = 0;
+  result += BakerMeshVK::estimateGpuMemory(triangles, vertices, false);
+
+  // A conservative guess for allocation granularity
+  const uint64_t alignment = 4096;
+
+  // BLAS
+  VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+  {
+    nvvk::RaytracingBuilderKHR::BlasInput blasInput =
+        BakerReferenceScene::createBlasInput(0, 0, static_cast<uint32_t>(vertices), static_cast<uint32_t>(triangles));
+
+    VkAccelerationStructureBuildGeometryInfoKHR geometryInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    geometryInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    geometryInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    geometryInfo.flags         = blasInput.flags | flags;
+    geometryInfo.geometryCount = static_cast<uint32_t>(blasInput.asGeometry.size());
+    geometryInfo.pGeometries   = blasInput.asGeometry.data();
+
+    std::vector<uint32_t> maxPrimCount;
+    for(auto& offset : blasInput.asBuildOffsetInfo)
+      maxPrimCount.push_back(offset.primitiveCount);
+
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &geometryInfo,
+                                            maxPrimCount.data(), &sizeInfo);
+
+    result += nvh::align_up(sizeInfo.accelerationStructureSize, alignment);
+  }
+
+  // TLAS
+  {
+    VkAccelerationStructureGeometryKHR topASGeometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    topASGeometry.geometryType       = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    topASGeometry.geometry.instances = {VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+    topASGeometry.geometry.instances.data.deviceAddress = 0;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    buildInfo.flags                    = flags;
+    buildInfo.geometryCount            = 1;
+    buildInfo.pGeometries              = &topASGeometry;
+    buildInfo.mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.type                     = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.srcAccelerationStructure = VK_NULL_HANDLE;
+
+    uint32_t                                 primitiveCounts = 1;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo,
+                                            &primitiveCounts, &sizeInfo);
+
+    result += nvh::align_up(sizeInfo.accelerationStructureSize, alignment);
+  }
+
+  return result;
 }
 
 //--------------------------------------run------------------------------------------------------------
@@ -277,73 +335,70 @@ void BakerVK::destroyVkHighGeometry()
 // - Create a buffer of Vertex and Index for each primitive
 // - Each primInfo has a reference to the vertex and index buffer, and which material id it uses
 //
-void BakerVK::createVertexBuffer(VkCommandBuffer cmdBuf, const meshops::MeshView& meshView, SceneVK& vkScene)
+void BakerMeshVK::create(nvvk::ResourceAllocator* alloc, VkCommandBuffer cmdBuf, const meshops::MeshView& meshView, bool requireDirectionBounds)
 {
-  nvh::Stopwatch sw;
-  LOGI("- Create Vertex Buffer ");
+  nvh::ScopedTimer           t("  Create Vertex Buffer");
+  VkDevice                   device = alloc->getDevice();
+  std::vector<BakerMeshInfo> primInfo;  // The array of all primitive information
+  VkBufferUsageFlags         usageFlag = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 
-  std::vector<PrimMeshInfo> primInfo;  // The array of all primitive information
-  uint32_t                  primIdx{0};
-
-  auto usageFlag = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-
-  for(auto meshIdx = 0; meshIdx < 1; ++meshIdx)
+  // Populate vertex buffer
+  std::vector<CompressedVertex> cvertices;
+  for(size_t v_ctx = 0; v_ctx < meshView.vertexCount(); v_ctx++)
   {
-    nvvk::Buffer v_buffer;  // Vertex buffer result
-    {
-      // Buffer of Vertex per primitive
-      std::vector<CompressedVertex> cvertices;
-      for(size_t v_ctx = 0; v_ctx < meshView.vertexCount(); v_ctx++)
-      {
-        Vertex v{};
-        size_t idx = v_ctx;
-        v.position = meshView.vertexPositions[idx];
-        if(!meshView.vertexNormals.empty())
-          v.normal = meshView.vertexNormals[idx];
-        if(!meshView.vertexTangents.empty())
-          v.tangent = meshView.vertexTangents[idx];
-        if(!meshView.vertexTexcoords0.empty())
-          v.texCoord = meshView.vertexTexcoords0[idx];
-        if(!meshView.vertexDirections.empty())
-          v.displacementDirection = meshView.vertexDirections[idx];
-        cvertices.emplace_back(compressVertex(v));
-      }
-      v_buffer = m_alloc.createBuffer(cmdBuf, cvertices, usageFlag | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-      vkScene.numVertices.push_back((uint32_t)cvertices.size());
-    }
-    vkScene.verticesBuf.emplace_back(v_buffer);
-
-    // Buffer of indices
-    auto i_buffer = m_alloc.createBuffer(cmdBuf, meshView.triangleVertices.size() * sizeof(meshView.triangleVertices[0]),
-                                         meshView.triangleVertices.data(), usageFlag | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    vkScene.indicesBuf.emplace_back(i_buffer);
-
-    // Primitive information, material Id and addresses of buffers
-    PrimMeshInfo info{};
-    info.materialIndex = 0;
-    info.vertexAddress = nvvk::getBufferDeviceAddress(m_device, v_buffer.buffer);
-    info.indexAddress  = nvvk::getBufferDeviceAddress(m_device, i_buffer.buffer);
-    if(m_directionBoundsBuf.buffer)
-    {
-      info.vertexDirectionBoundsAddress = nvvk::getBufferDeviceAddress(m_device, m_directionBoundsBuf.buffer);
-    }
-    if(m_directionBoundsOrigBuf.buffer)
-    {
-      info.vertexDirectionBoundsOrigAddress = nvvk::getBufferDeviceAddress(m_device, m_directionBoundsOrigBuf.buffer);
-    }
-    info.numTriangles = static_cast<uint32_t>(meshView.triangleCount());
-    primInfo.emplace_back(info);
-
-    vkScene.numTriangles.push_back(info.numTriangles);
-    vkScene.totalTriangles += meshView.triangleCount();
-
-    primIdx++;
+    Vertex v{};
+    size_t idx = v_ctx;
+    v.position = meshView.vertexPositions[idx];
+    if(!meshView.vertexNormals.empty())
+      v.normal = meshView.vertexNormals[idx];
+    if(!meshView.vertexTangents.empty())
+      v.tangent = meshView.vertexTangents[idx];
+    if(!meshView.vertexTexcoords0.empty())
+      v.texCoord = meshView.vertexTexcoords0[idx];
+    if(!meshView.vertexDirections.empty())
+      v.displacementDirection = meshView.vertexDirections[idx];
+    cvertices.emplace_back(compressVertex(v));
   }
+  verticesBuf = alloc->createBuffer(cmdBuf, cvertices, usageFlag | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  numVertices = static_cast<uint32_t>(cvertices.size());
+
+  // Buffer of indices
+  indicesBuf = alloc->createBuffer(cmdBuf, meshView.triangleVertices.size() * sizeof(meshView.triangleVertices[0]),
+                                   meshView.triangleVertices.data(), usageFlag | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+  // Primitive information, material Id and addresses of buffers
+  BakerMeshInfo info{};
+  info.vertexAddress = nvvk::getBufferDeviceAddress(device, verticesBuf.buffer);
+  info.indexAddress  = nvvk::getBufferDeviceAddress(device, indicesBuf.buffer);
+
+  if(requireDirectionBounds)
+  {
+    VkBufferUsageFlags bufferUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    VkDeviceSize boundsTotalBytes  = meshView.vertexDirectionBounds.size() * sizeof(meshView.vertexDirectionBounds[0]);
+    directionBoundsBuf = alloc->createBuffer(boundsTotalBytes, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    {
+      nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(alloc->map(directionBoundsBuf));
+      std::copy(meshView.vertexDirectionBounds.begin(), meshView.vertexDirectionBounds.end(), directionBounds);
+      alloc->unmap(directionBoundsBuf);
+    }
+    directionBoundsOrigBuf = alloc->createBuffer(boundsTotalBytes, bufferUsage, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    {
+      nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(alloc->map(directionBoundsOrigBuf));
+      std::copy(meshView.vertexDirectionBounds.begin(), meshView.vertexDirectionBounds.end(), directionBounds);
+      alloc->unmap(directionBoundsOrigBuf);
+    }
+
+    info.vertexDirectionBoundsAddress     = nvvk::getBufferDeviceAddress(device, directionBoundsBuf.buffer);
+    info.vertexDirectionBoundsOrigAddress = nvvk::getBufferDeviceAddress(device, directionBoundsOrigBuf.buffer);
+  }
+  info.numTriangles = static_cast<uint32_t>(meshView.triangleCount());
+  primInfo.emplace_back(info);
+
+  numTriangles = info.numTriangles;
 
   // Creating the buffer of all primitive information
-  vkScene.primInfoBuf = m_alloc.createBuffer(cmdBuf, primInfo, usageFlag);
-  LOGI("%7.2fms\n", sw.elapsed());
+  primInfoBuf = alloc->createBuffer(cmdBuf, primInfo, usageFlag);
 }
 
 // Temporary struct passed to per-thread vertex generation functions below.
@@ -356,7 +411,7 @@ struct MakeVertexData
   const micromesh::ArrayInfo_uint16&            inputTriangleSubdivLevels;
   const micromesh::MeshTopology&                topology;
   const size_t                                  maxAdjacentVertices;
-  const std::vector<uint32_t>&                  selectedBaseTriangles;
+  const GeometryBatch&                          batch;
 
   // Output compressed vertices
   std::vector<CompressedVertex>& cvertices;
@@ -417,7 +472,7 @@ static inline Vertex makeSanitizedVertex(MakeVertexData* makeVertexData, const m
 {
   std::vector<micromesh::MicroVertexInfo>& sanitizeBuffer = makeVertexData->sanitizeBuffers[threadIndex];
 
-  uint32_t meshTriangleIndex = makeVertexData->selectedBaseTriangles[vertexInfo->meshTriangleIndex];
+  uint32_t meshTriangleIndex = makeVertexData->batch.triangle(vertexInfo->meshTriangleIndex);
 
   micromesh::MicroVertexInfo queryVertex{meshTriangleIndex, vertexInfo->vertexUV};
 
@@ -477,182 +532,171 @@ static inline uint32_t generateTessellatedVertex(const micromesh::VertexGenerate
   makeVertexData->cvertices[index] = compressVertex(vertex);
   return index;
 };
+
 //--------------------------------------------------------------------------------------------------
 // Creating information per primitive
 // - Create a buffer of Vertex and Index for each primitive
 // - Each primInfo has a reference to the vertex and index buffer, and which material id it uses
 //
-bool BakerVK::createTessellatedVertexBuffer(const meshops::OpBake_input& info,
-                                            VkCommandBuffer              cmdBuf,
-                                            const meshops::MeshView&     meshView,
-                                            SceneVK&                     vkScene,
-                                            const GeometryBatch&         batch,
-                                            int                          maxSubdivLevel)
+bool BakerMeshVK::createTessellated(micromesh::OpContext         micromeshContext,
+                                    nvvk::ResourceAllocator*     alloc,
+                                    const meshops::OpBake_input& input,
+                                    VkCommandBuffer              cmdBuf,
+                                    const meshops::MeshView&     meshView,
+                                    const GeometryBatch&         batch,
+                                    int                          maxSubdivLevel)
 {
   nvh::Stopwatch sw;
-  LOGI("- Create Vertex Buffer ");
+  VkDevice       device = alloc->getDevice();
+  LOGI("  Create Tessellated Vertex Buffer ");
 
-  std::vector<PrimMeshInfo> primInfo;  // The array of all primitive information
-  auto                      usageFlag = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+  std::vector<BakerMeshInfo> primInfos;  // The array of all primitive information
+  VkBufferUsageFlags         usageFlag = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                                 | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 
-  for(auto primIdx = 0; primIdx < 1; ++primIdx)
+  auto&     dispInfo   = input.referenceMeshHeightmap;
+  auto      directions = dispInfo.usesVertexNormalsAsDirections ? meshView.vertexNormals : meshView.vertexDirections;
+  HeightMap heightmap;
+  if(dispInfo.texture)
   {
-    auto&     dispInfo   = info.referenceMeshHeightmap;
-    auto      directions = dispInfo.usesVertexNormalsAsDirections ? meshView.vertexNormals : meshView.vertexDirections;
-    HeightMap heightmap;
-    if(dispInfo.texture)
+    heightmap = HeightMap(dispInfo.texture->m_config.width, dispInfo.texture->m_config.height,
+                          reinterpret_cast<const float*>(dispInfo.texture->getImageData()));
+  }
+
+  micromesh::Result       result;
+  micromesh::MeshTopology topology = *input.referenceMeshTopology;
+
+  // Extract only the subdiv levels for the selected triangles. Batches may
+  // contain a subset of triangles. If so, they will share border triangles with
+  // an aim to ensure watertightness.
+  std::vector<uint16_t> selectedSubdivLevels(batch.size());
+  std::vector<uint8_t>  selectedEdgeFlags(batch.size());
+  for(uint32_t i = 0; i < static_cast<uint32_t>(batch.size()); ++i)
+  {
+    selectedSubdivLevels[i] = meshView.triangleSubdivisionLevels[batch.triangle(i)];
+    selectedEdgeFlags[i]    = meshView.trianglePrimitiveFlags[batch.triangle(i)];
+  }
+
+  // Tessellation output
+  std::vector<CompressedVertex>           cvertices;
+  std::vector<micromesh::Vector_uint32_3> triangleVertices;
+
+
+  micromesh::ArrayInfo_uint16 inputTriangleSubdivLevels;
+  // Need to cast because ArrayInfo does not have a const void pointer
+  micromesh::arraySetDataVec(inputTriangleSubdivLevels, ArrayViewConstCast(meshView.triangleSubdivisionLevels));
+  size_t maxAdjacentVertices(std::max(topology.maxEdgeTriangleValence, topology.maxVertexTriangleValence));
+
+  MakeVertexData makeVertexData{
+      meshView, dispInfo, heightmap, directions, inputTriangleSubdivLevels, topology, maxAdjacentVertices,
+      batch,    cvertices};
+  uint32_t threadCount = micromesh::micromeshOpContextGetConfig(micromeshContext).threadCount;
+  makeVertexData.setupSanitizationBuffers(threadCount);
+
+  // Tessellate the selected triangles
+  {
+    micromesh::OpTessellateMesh_input input;
+    input.useVertexDeduplication = true;
+    input.maxSubdivLevel         = maxSubdivLevel;
+    input.userData               = &makeVertexData;
+    input.pfnGenerateVertex      = generateTessellatedVertex;
+    micromesh::arraySetDataVec(input.meshTriangleSubdivLevels, selectedSubdivLevels);
+    micromesh::arraySetDataVec(input.meshTrianglePrimitiveFlags, selectedEdgeFlags);
+
+    micromesh::OpTessellateMesh_output output;
+    result = micromesh::micromeshOpTessellateMeshBegin(micromeshContext, &input, &output);
+    assert(result == micromesh::Result::eSuccess);
+    if(result != micromesh::Result::eSuccess)
     {
-      heightmap = HeightMap(dispInfo.texture->m_config.width, dispInfo.texture->m_config.height,
-                            reinterpret_cast<const float*>(dispInfo.texture->getImageData()));
-    }
-
-    micromesh::Result       result;
-    micromesh::MeshTopology topology = *info.referenceMeshTopology;
-
-    // Grow the selected triangles by one. A MeshTopology structure is needed to
-    // generate indices for the new subset of mesh triangles.
-    std::vector<uint32_t> selectedBaseTriangles;
-    {
-      micromesh::OpGrowTriangleSelection_input input;
-      input.topology      = &topology;
-      input.triangleFirst = batch.triangleOffset;
-      input.triangleCount = batch.triangleCount;
-
-      selectedBaseTriangles.resize(topology.triangleVertices.count);
-
-      micromesh::OpGrowTriangleSelection_output output;
-      micromesh::arraySetDataVec(output.triangleSelection, selectedBaseTriangles);
-
-      result = micromesh::micromeshOpGrowTriangleSelection(m_micromeshContext, &input, &output);
-      assert(result == micromesh::Result::eSuccess);
-
-      selectedBaseTriangles.resize(output.triangleSelectionCount);
-    }
-
-    // Extract only the subdiv levels for the selected triangles
-    std::vector<uint16_t> selectedSubdivLevels(selectedBaseTriangles.size());
-    std::vector<uint8_t>  selectedEdgeFlags(selectedBaseTriangles.size());
-    for(size_t i = 0; i < selectedBaseTriangles.size(); ++i)
-    {
-      selectedSubdivLevels[i] = meshView.triangleSubdivisionLevels[selectedBaseTriangles[i]];
-      selectedEdgeFlags[i]    = meshView.trianglePrimitiveFlags[selectedBaseTriangles[i]];
-    }
-
-    // Tessellation output
-    std::vector<CompressedVertex>           cvertices;
-    std::vector<micromesh::Vector_uint32_3> triangleVertices;
-
-
-    micromesh::ArrayInfo_uint16 inputTriangleSubdivLevels;
-    // Need to cast because ArrayInfo does not have a const void pointer
-    micromesh::arraySetDataVec(inputTriangleSubdivLevels, ArrayViewConstCast(meshView.triangleSubdivisionLevels));
-    size_t maxAdjacentVertices(std::max(topology.maxEdgeTriangleValence, topology.maxVertexTriangleValence));
-
-    MakeVertexData makeVertexData{
-        meshView, dispInfo, heightmap, directions, inputTriangleSubdivLevels, topology, maxAdjacentVertices, selectedBaseTriangles, cvertices};
-    makeVertexData.setupSanitizationBuffers(m_threadCount);
-
-    // Tessellate the selected triangles
-    {
-      micromesh::OpTessellateMesh_input input;
-      input.useVertexDeduplication = true;
-      input.maxSubdivLevel         = maxSubdivLevel;
-      input.userData               = &makeVertexData;
-      input.pfnGenerateVertex      = generateTessellatedVertex;
-      micromesh::arraySetDataVec(input.meshTriangleSubdivLevels, selectedSubdivLevels);
-      micromesh::arraySetDataVec(input.meshTrianglePrimitiveFlags, selectedEdgeFlags);
-
-      micromesh::OpTessellateMesh_output output;
-      result = micromesh::micromeshOpTessellateMeshBegin(m_micromeshContext, &input, &output);
-      assert(result == micromesh::Result::eSuccess);
-
-      cvertices.resize(output.vertexCount);
-      triangleVertices.resize(output.meshTriangleVertices.count);
-      output.meshTriangleVertices.data = triangleVertices.data();
-
-      result = micromesh::micromeshOpTessellateMeshEnd(m_micromeshContext, &input, &output);
-      assert(result == micromesh::Result::eSuccess);
-
-      // Some vertices may have been merged if useVertexDeduplication is set
-      cvertices.resize(output.vertexCount);
-    }
-
-    // Add the total triangles to the "Create Vertex Buffer" status line.
-    // Flush in case m_alloc.createBuffer fails, so we know the reason.
-    LOGI("(triangles: %zu) ", triangleVertices.size());
-    fflush(stdout);
-
-    if(cvertices.empty() || triangleVertices.empty())
-    {
-      LOGW("\nWarning: Skipping empty highres batch %i\n", batch.batchIndex + 1);
+      LOGE("Error: micromesh::micromeshOpTessellateMeshBegin() returned %s\n", micromeshResultGetName(result));
       return false;
     }
 
-    if(info.settings.debugDisplacedReferenceMeshCallback)
+    cvertices.resize(output.vertexCount);
+    triangleVertices.resize(output.meshTriangleVertices.count);
+    output.meshTriangleVertices.data = triangleVertices.data();
+
+    result = micromesh::micromeshOpTessellateMeshEnd(micromeshContext, &input, &output);
+    assert(result == micromesh::Result::eSuccess);
+    if(result != micromesh::Result::eSuccess)
     {
-      LOGI("\n");  // Break the "Create Vertex Buffer" line for logging in saveSimpleGeometry()
-
-      // Convert to array of uncompressed vertices
-      std::vector<Vertex> vertices(cvertices.size());
-      for(size_t i = 0; i < cvertices.size(); i++)
-      {
-        vertices[i] = decompressVertex(cvertices[i]);
-      }
-
-      // Wrap input data in a MeshView with one slice referring to the lot
-      meshops::MeshView meshView;
-      meshView.triangleVertices = ArrayView<nvmath::vec3ui>(ArrayView(triangleVertices));
-      meshView.vertexPositions =
-          ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].position), vertices.size(), sizeof(Vertex));
-      meshView.vertexNormals = ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].normal), vertices.size(), sizeof(Vertex));
-      meshView.vertexTangents =
-          ArrayView(reinterpret_cast<nvmath::vec4f*>(&vertices[0].tangent), vertices.size(), sizeof(Vertex));
-      meshView.vertexDirections =
-          ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].displacementDirection), vertices.size(), sizeof(Vertex));
-
-      info.settings.debugDisplacedReferenceMeshCallback(meshView, &info.baseMeshTransform, batch.batchIndex,
-                                                        batch.totalBatches, info.settings.debugDisplacedReferenceMeshUserPtr);
+      LOGE("Error: micromesh::micromeshOpTessellateMeshEnd() returned %s\n", micromeshResultGetName(result));
+      return false;
     }
 
-    auto v_buffer = m_alloc.createBuffer(cmdBuf, cvertices, usageFlag | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-    vkScene.verticesBuf.push_back(v_buffer);
-    vkScene.numVertices.push_back((uint32_t)cvertices.size());
-
-    auto i_buffer = m_alloc.createBuffer(cmdBuf, triangleVertices, usageFlag | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-    vkScene.indicesBuf.emplace_back(i_buffer);
-
-    // Compute the max absolute displacement from the heightmap
-    float maxDisp = 0.0f;
-    if(dispInfo.texture)
-    {
-      nvmath::mat4f referenceMeshTransform(&info.referenceMeshTransform.columns[0].x);
-      for(auto& direction : directions)
-      {
-        // The conservative (min, max) heightmap displacement is direction * (0 * scale + bias, 1 * scale + bias),
-        // converted to world space. Since these scale the direction vector, its length in world space can be reused.
-        float l = nvmath::length(referenceMeshTransform.get_rot_mat3()
-                                 * (dispInfo.normalizeDirections ? nvmath::normalize(direction) : direction));
-        maxDisp = std::max(maxDisp, std::abs(l * dispInfo.bias));
-        maxDisp = std::max(maxDisp, std::abs(l * (dispInfo.scale + dispInfo.bias)));
-      }
-    }
-
-    // Primitive information, material Id and addresses of buffers
-    PrimMeshInfo info{};
-    info.materialIndex     = 0;
-    info.vertexAddress     = nvvk::getBufferDeviceAddress(m_device, v_buffer.buffer);
-    info.indexAddress      = nvvk::getBufferDeviceAddress(m_device, i_buffer.buffer);
-    info.numTriangles      = (uint32_t)triangleVertices.size();
-    info.maxDisplacementWs = maxDisp;
-    primInfo.emplace_back(info);
-
-    vkScene.numTriangles.push_back(info.numTriangles);
-    vkScene.totalTriangles += info.numTriangles;
+    // Some vertices may have been merged if useVertexDeduplication is set
+    cvertices.resize(output.vertexCount);
   }
 
+  // Add the total triangles to the "Create Vertex Buffer" status line.
+  // Flush in case alloc->createBuffer fails, so we know the reason.
+  LOGI("(triangles: %zu) ", triangleVertices.size());
+  fflush(stdout);
+
+  if(cvertices.empty() || triangleVertices.empty())
+  {
+    LOGW("\nWarning: Skipping empty batch %i\n", batch.batchIndex + 1);
+    return false;
+  }
+
+  if(input.settings.debugDisplacedReferenceMeshCallback)
+  {
+    LOGI("\n");  // Break the "Create Vertex Buffer" line for logging in saveSimpleGeometry()
+
+    // Convert to array of uncompressed vertices
+    std::vector<Vertex> vertices(cvertices.size());
+    for(size_t i = 0; i < cvertices.size(); i++)
+    {
+      vertices[i] = decompressVertex(cvertices[i]);
+    }
+
+    // Wrap input data in a MeshView with one slice referring to the lot
+    meshops::MeshView meshView;
+    meshView.triangleVertices = ArrayView<nvmath::vec3ui>(ArrayView(triangleVertices));
+    meshView.vertexPositions =
+        ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].position), vertices.size(), sizeof(Vertex));
+    meshView.vertexNormals = ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].normal), vertices.size(), sizeof(Vertex));
+    meshView.vertexTangents = ArrayView(reinterpret_cast<nvmath::vec4f*>(&vertices[0].tangent), vertices.size(), sizeof(Vertex));
+    meshView.vertexDirections =
+        ArrayView(reinterpret_cast<nvmath::vec3f*>(&vertices[0].displacementDirection), vertices.size(), sizeof(Vertex));
+
+    input.settings.debugDisplacedReferenceMeshCallback(meshView, &input.baseMeshTransform, batch.batchIndex,
+                                                       batch.totalBatches, input.settings.debugDisplacedReferenceMeshUserPtr);
+  }
+
+  verticesBuf = alloc->createBuffer(cmdBuf, cvertices, usageFlag | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  numVertices = static_cast<uint32_t>(cvertices.size());
+
+  indicesBuf = alloc->createBuffer(cmdBuf, triangleVertices, usageFlag | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+  // Compute the max absolute displacement from the heightmap
+  float maxDisp = 0.0f;
+  if(dispInfo.texture)
+  {
+    nvmath::mat4f referenceMeshTransform(&input.referenceMeshTransform.columns[0].x);
+    for(auto& direction : directions)
+    {
+      // The conservative (min, max) heightmap displacement is direction * (0 * scale + bias, 1 * scale + bias),
+      // converted to world space. Since these scale the direction vector, its length in world space can be reused.
+      float l = nvmath::length(referenceMeshTransform.get_rot_mat3()
+                               * (dispInfo.normalizeDirections ? nvmath::normalize(direction) : direction));
+      maxDisp = std::max(maxDisp, std::abs(l * dispInfo.bias));
+      maxDisp = std::max(maxDisp, std::abs(l * (dispInfo.scale + dispInfo.bias)));
+    }
+  }
+
+  // Primitive information, material Id and addresses of buffers
+  BakerMeshInfo primInfo{};
+  primInfo.vertexAddress     = nvvk::getBufferDeviceAddress(device, verticesBuf.buffer);
+  primInfo.indexAddress      = nvvk::getBufferDeviceAddress(device, indicesBuf.buffer);
+  primInfo.numTriangles      = static_cast<uint32_t>(triangleVertices.size());
+  primInfo.maxDisplacementWs = maxDisp;
+  primInfos.emplace_back(primInfo);
+
+  numTriangles = primInfo.numTriangles;
+
   // Creating the buffer of all primitive information
-  vkScene.primInfoBuf = m_alloc.createBuffer(cmdBuf, primInfo, usageFlag);
+  primInfoBuf = alloc->createBuffer(cmdBuf, primInfos, usageFlag);
   LOGI("%7.2fms\n", sw.elapsed());
   return true;
 }
@@ -661,11 +705,10 @@ bool BakerVK::createTessellatedVertexBuffer(const meshops::OpBake_input& info,
 //--------------------------------------------------------------------------------------------------
 // Converting a GLTF primitive in the Raytracing Geometry used for the BLAS
 //
-auto BakerVK::primitiveToGeometry(const meshops::MeshView& prim,
-                                  VkDeviceAddress          vertexAddress,
-                                  VkDeviceAddress          indexAddress,
-                                  uint32_t                 numVertices,
-                                  uint32_t                 numTriangles)
+nvvk::RaytracingBuilderKHR::BlasInput BakerReferenceScene::createBlasInput(VkDeviceAddress vertexAddress,
+                                                                           VkDeviceAddress indexAddress,
+                                                                           uint32_t        numVertices,
+                                                                           uint32_t        numTriangles)
 {
   // Describe buffer as array of VertexObj.
   VkAccelerationStructureGeometryTrianglesDataKHR triangles{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
@@ -701,31 +744,22 @@ auto BakerVK::primitiveToGeometry(const meshops::MeshView& prim,
 //--------------------------------------------------------------------------------------------------
 // Create all bottom level acceleration structures (BLAS)
 //
-void BakerVK::createBottomLevelAS(const meshops::MeshView& meshView, const SceneVK& vkScene, const GeometryBatch& batch)
+void BakerReferenceScene::createBottomLevelAS(VkDevice device)
 {
-  ScopedTimer t("Create Bottom Level AS");
-
-  // BLAS - Storing each primitive in a geometry, but we don't batch more than one together
-  std::vector<nvvk::RaytracingBuilderKHR::BlasInput> allBlas;
-
-  // Only index buffers in this batch are created
-  uint32_t p_idx = 0;
-  uint32_t v_idx = 0;
-
-  auto vertexAddress = nvvk::getBufferDeviceAddress(m_device, vkScene.verticesBuf[v_idx].buffer);
-  auto indexAddress  = nvvk::getBufferDeviceAddress(m_device, vkScene.indicesBuf[p_idx].buffer);
-
-  auto geo = primitiveToGeometry(meshView, vertexAddress, indexAddress, vkScene.numVertices[v_idx], vkScene.numTriangles[p_idx]);
-  allBlas.push_back({geo});
-  m_rtBuilder.buildBlas(allBlas, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+  nvh::ScopedTimer t("  Create Bottom Level AS");
+  auto             vertexAddress = nvvk::getBufferDeviceAddress(device, referenceVk.verticesBuf.buffer);
+  auto             indexAddress  = nvvk::getBufferDeviceAddress(device, referenceVk.indicesBuf.buffer);
+  std::vector<nvvk::RaytracingBuilderKHR::BlasInput> allBlas = {
+      createBlasInput(vertexAddress, indexAddress, referenceVk.numVertices, referenceVk.numTriangles)};
+  rtBuilder.buildBlas(allBlas, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Create the top level acceleration structures, referencing all BLAS
 //
-void BakerVK::createTopLevelAS(const meshops::OpBake_input& info, const meshops::MeshView& meshView, const GeometryBatch& batch)
+void BakerReferenceScene::createTopLevelAS(const meshops::OpBake_input& input)
 {
-  ScopedTimer t("Create Top Level AS");
+  nvh::ScopedTimer t("  Create Top Level AS");
 
   std::vector<VkAccelerationStructureInstanceKHR> tlas;
   tlas.reserve(1);
@@ -733,7 +767,7 @@ void BakerVK::createTopLevelAS(const meshops::OpBake_input& info, const meshops:
   uint32_t primMeshID = 0;
 
   // Use the transform from the mesh's first instance
-  nvmath::mat4f referenceMeshTransform(&info.referenceMeshTransform.columns[0].x);
+  nvmath::mat4f referenceMeshTransform(&input.referenceMeshTransform.columns[0].x);
 
   uint32_t blasId = 0;
 
@@ -744,13 +778,13 @@ void BakerVK::createTopLevelAS(const meshops::OpBake_input& info, const meshops:
   VkAccelerationStructureInstanceKHR rayInst{};
   rayInst.transform           = nvvk::toTransformMatrixKHR(referenceMeshTransform);  // Position of the instance
   rayInst.instanceCustomIndex = primMeshID & 0xFFF;                                  // gl_InstanceCustomIndexEXT
-  rayInst.accelerationStructureReference         = m_rtBuilder.getBlasDeviceAddress(blasId);
+  rayInst.accelerationStructureReference = rtBuilder.getBlasDeviceAddress(blasId);
   rayInst.instanceShaderBindingTableRecordOffset = 0;  // We will use the same hit group for all objects
   rayInst.flags                                  = flags & 0xFF;
   rayInst.mask                                   = 0xFF;
 
   tlas.emplace_back(rayInst);
-  m_rtBuilder.buildTlas(tlas, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+  rtBuilder.buildTlas(tlas, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -758,71 +792,78 @@ void BakerVK::createTopLevelAS(const meshops::OpBake_input& info, const meshops:
 //
 void BakerVK::destroy()
 {
-  destroyVkScene(m_lowVk);
+  m_baseVk.destroy(m_vk.resAllocator);
 
-  m_alloc.destroy(m_distanceBuf);
+  m_vk.resAllocator->destroy(m_distanceBuf);
   for(auto& b : m_baryCoordBuf)
-    m_alloc.destroy(b);
-  m_alloc.destroy(m_trianglesBuf);
-  m_alloc.destroy(m_triangleMinMaxBuf);
-  m_alloc.destroy(m_directionBoundsBuf);
-  m_alloc.destroy(m_directionBoundsOrigBuf);
+    m_vk.resAllocator->destroy(b);
+  m_vk.resAllocator->destroy(m_trianglesBuf);
+  m_vk.resAllocator->destroy(m_triangleMinMaxBuf);
 }
 
 //--------------------------------------------------------------------------------------------------
 // Destroy local scene resources
 //
-void BakerVK::destroyVkScene(SceneVK& vkScene)
+void BakerMeshVK::destroy(nvvk::ResourceAllocator* alloc)
 {
-  for(auto& v : vkScene.verticesBuf)
-    m_alloc.destroy(v);
-  vkScene.verticesBuf.clear();
-
-  for(auto& i : vkScene.indicesBuf)
-    m_alloc.destroy(i);
-  vkScene.indicesBuf.clear();
-
-  m_alloc.destroy(vkScene.primInfoBuf);
-
-  // Clear all members
-  vkScene = {};
+  alloc->destroy(verticesBuf);
+  alloc->destroy(indicesBuf);
+  alloc->destroy(directionBoundsBuf);
+  alloc->destroy(directionBoundsOrigBuf);
+  alloc->destroy(primInfoBuf);
 }
 
+uint64_t BakerMeshVK::estimateGpuMemory(uint64_t triangles, uint64_t vertices, bool requireDirectionBounds)
+{
+  // A conservative guess for allocation granularity
+  const uint64_t alignment = 4096;
+
+  // Buffers allocated in create() and createTessellated()
+  uint64_t result = 0;
+  result += nvh::align_up(sizeof(glsl_shared::CompressedVertex) * vertices, alignment);  // vertices - raw position and compressed attributes
+  result += nvh::align_up(sizeof(nvmath::vec3ui) * triangles, alignment);  // indices
+  result += nvh::align_up(sizeof(glsl_shared::BakerMeshInfo), alignment);
+  if(requireDirectionBounds)
+  {
+    result += nvh::align_up(sizeof(nvmath::vec2f) * vertices, alignment);  // directionBoundsBuf
+    result += nvh::align_up(sizeof(nvmath::vec2f) * vertices, alignment);  // directionBoundsOrigBuf
+  }
+  return result;
+}
 
 //--------------------------------------------------------------------------------------------------
 //
 //
-void BakerVK::createBakerPipeline()
+void BakerPipeline::create(VkDevice device, VkBuffer sceneDescBuf, VkAccelerationStructureKHR referenceSceneTlas)
 {
-  ScopedTimer t("Create Baker Pipeline");
+  nvh::ScopedTimer t("  Create Baker Pipeline");
 
   // Descriptors
-  auto& d = m_dContainer;
+  auto& d = descriptor;
   d.binder.clear();
   d.binder.addBinding(+SceneBindings::eSceneDesc, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);
   d.binder.addBinding(+SceneBindings::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
-  d.layout = d.binder.createLayout(m_device);
-  d.pool   = d.binder.createPool(m_device, 1);
-  d.set    = nvvk::allocateDescriptorSet(m_device, d.pool, d.layout);
+  d.layout = d.binder.createLayout(device);
+  d.pool   = d.binder.createPool(device, 1);
+  d.set    = nvvk::allocateDescriptorSet(device, d.pool, d.layout);
 
   // Writing to descriptors
-  const auto&                                  tlas = m_rtBuilder.getAccelerationStructure();
   std::vector<VkWriteDescriptorSet>            writes;
-  VkDescriptorBufferInfo                       b0{m_sceneDescBuf.buffer, 0, VK_WHOLE_SIZE};
+  VkDescriptorBufferInfo                       b0{sceneDescBuf, 0, VK_WHOLE_SIZE};
   VkWriteDescriptorSetAccelerationStructureKHR t0{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-                                                  nullptr, 1, &tlas};
+                                                  nullptr, 1, &referenceSceneTlas};
   writes.emplace_back(d.binder.makeWrite(d.set, +SceneBindings::eSceneDesc, &b0));
   writes.emplace_back(d.binder.makeWrite(d.set, +SceneBindings::eTlas, &t0));
-  vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
   // Pipeline
-  auto& p = m_pContainer;
+  auto& p = pipeline;
 
   nvvk::Specialization specialization;
   specialization.add({{0, 0}});
 
   // Push constants in the compute shader
-  VkPushConstantRange pushConstantRanges = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushHighLow)};
+  VkPushConstantRange pushConstantRanges = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BakerPushConstants)};
 
   // Creating the pipeline layout
   VkPipelineLayoutCreateInfo createInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -830,15 +871,12 @@ void BakerVK::createBakerPipeline()
   createInfo.pSetLayouts            = &d.layout;
   createInfo.pushConstantRangeCount = 1;
   createInfo.pPushConstantRanges    = &pushConstantRanges;
-  vkCreatePipelineLayout(m_device, &createInfo, nullptr, &p.layout);
-
-  // Shader spirv
-  std::vector<uint32_t> compShader(std::begin(bary_trace_comp), std::end(bary_trace_comp));
+  vkCreatePipelineLayout(device, &createInfo, nullptr, &p.layout);
 
   // Baker compute shader
   VkPipelineShaderStageCreateInfo stageInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
   stageInfo.stage               = VK_SHADER_STAGE_COMPUTE_BIT;
-  stageInfo.module              = nvvk::createShaderModule(m_device, bary_trace_comp, sizeof(bary_trace_comp));
+  stageInfo.module              = nvvk::createShaderModule(device, bary_trace_comp, sizeof(bary_trace_comp));
   stageInfo.pName               = "main";
   stageInfo.pSpecializationInfo = specialization.getSpecialization();
 
@@ -846,31 +884,32 @@ void BakerVK::createBakerPipeline()
   compInfo.layout = p.layout;
   compInfo.stage  = stageInfo;
 
-  vkCreateComputePipelines(m_device, {}, 1, &compInfo, nullptr, &p.pipeline);
+  vkCreateComputePipelines(device, {}, 1, &compInfo, nullptr, &p.pipeline);
 
-  vkDestroyShaderModule(m_device, stageInfo.module, nullptr);
+  vkDestroyShaderModule(device, stageInfo.module, nullptr);
 }
 
-void BakerVK::destroyBakerPipeline()
+void BakerPipeline::destroy(VkDevice device)
 {
-  auto& p = m_pContainer;
-  vkDestroyPipeline(m_device, p.pipeline, nullptr);
-  vkDestroyPipelineLayout(m_device, p.layout, nullptr);
-  auto& d = m_dContainer;
-  vkDestroyDescriptorPool(m_device, d.pool, nullptr);
-  vkDestroyDescriptorSetLayout(m_device, d.layout, nullptr);
+  vkDestroyPipeline(device, pipeline.pipeline, nullptr);
+  vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+  vkDestroyDescriptorPool(device, descriptor.pool, nullptr);
+  vkDestroyDescriptorSetLayout(device, descriptor.layout, nullptr);
 }
 
-void BakerVK::createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& inputTextures,
-                                      const std::vector<VkDescriptorImageInfo>& outputTextures,
-                                      const std::vector<VkDescriptorImageInfo>& distanceTextures)
+void ResamplerPipeline::create(VkDevice                                  device,
+                               VkBuffer                                  sceneDescBuf,
+                               VkAccelerationStructureKHR                referenceSceneTlas,
+                               const std::vector<VkDescriptorImageInfo>& inputTextures,
+                               const std::vector<VkDescriptorImageInfo>& outputTextures,
+                               const std::vector<VkDescriptorImageInfo>& distanceTextures)
 {
-  ScopedTimer t("Create Resampler Pipeline");
+  nvh::ScopedTimer t("Create Resampler Pipeline");
   assert(inputTextures.size() && inputTextures.size() < MAX_RESAMPLE_TEXTURES);
   assert(inputTextures.size() == outputTextures.size());
   assert(inputTextures.size() == distanceTextures.size());
 
-  // Bind input textures after removing any that are null. runResampler() builds
+  // Bind input textures after removing any that are null. run() builds
   // ResampleTextureInfo::inputIndex to reconstruct the mapping between input
   // and output textures. This is less convoluted than making vulkan accept null
   // descriptors.
@@ -880,7 +919,7 @@ void BakerVK::createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& 
                            validInputTextures.end());
 
   // Descriptors
-  auto& d = m_resampling.descriptor;
+  auto& d = descriptor;
   d.binder.clear();
   d.binder.addBinding(+SceneBindings::eSceneDesc, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL);
   d.binder.addBinding(+SceneBindings::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
@@ -891,16 +930,15 @@ void BakerVK::createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& 
   d.binder.addBinding(+SceneBindings::eTexturesDist, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                       (uint32_t)distanceTextures.size(), VK_SHADER_STAGE_ALL);
 
-  d.layout = d.binder.createLayout(m_device);
-  d.pool   = d.binder.createPool(m_device, 1);
-  d.set    = nvvk::allocateDescriptorSet(m_device, d.pool, d.layout);
+  d.layout = d.binder.createLayout(device);
+  d.pool   = d.binder.createPool(device, 1);
+  d.set    = nvvk::allocateDescriptorSet(device, d.pool, d.layout);
 
   // Writing to descriptors
-  const auto&                                  tlas = m_rtBuilder.getAccelerationStructure();
   std::vector<VkWriteDescriptorSet>            writes;
-  VkDescriptorBufferInfo                       b0{m_sceneDescBuf.buffer, 0, VK_WHOLE_SIZE};
+  VkDescriptorBufferInfo                       b0{sceneDescBuf, 0, VK_WHOLE_SIZE};
   VkWriteDescriptorSetAccelerationStructureKHR t0{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
-                                                  nullptr, 1, &tlas};
+                                                  nullptr, 1, &referenceSceneTlas};
   writes.emplace_back(d.binder.makeWrite(d.set, +SceneBindings::eSceneDesc, &b0));
   writes.emplace_back(d.binder.makeWrite(d.set, +SceneBindings::eTlas, &t0));
   if(validInputTextures.size())
@@ -909,12 +947,12 @@ void BakerVK::createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& 
   }
   writes.emplace_back(d.binder.makeWriteArray(d.set, +SceneBindings::eTexturesOut, outputTextures.data()));
   writes.emplace_back(d.binder.makeWriteArray(d.set, +SceneBindings::eTexturesDist, distanceTextures.data()));
-  vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+  vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 
-  auto& p = m_resampling.pipeline;
+  auto& p = pipeline;
 
   // Same push constants as the baker
-  VkPushConstantRange pushConstantRanges = {VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(PushHighLow)};
+  VkPushConstantRange pushConstantRanges = {VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(BakerPushConstants)};
 
   // Creating the pipeline layout
   VkPipelineLayoutCreateInfo createInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -922,52 +960,43 @@ void BakerVK::createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& 
   createInfo.pSetLayouts            = &d.layout;
   createInfo.pushConstantRangeCount = 1;
   createInfo.pPushConstantRanges    = &pushConstantRanges;
-  vkCreatePipelineLayout(m_device, &createInfo, nullptr, &p.layout);
+  vkCreatePipelineLayout(device, &createInfo, nullptr, &p.layout);
 
   // Resampling shader
   std::vector<uint32_t>                   resampleShaderVert(std::begin(resample_vert), std::end(resample_vert));
   std::vector<uint32_t>                   resampleShaderFrag(std::begin(resample_frag), std::end(resample_frag));
-  nvvk::GraphicsPipelineGeneratorCombined gpb(m_device, p.layout, {});
+  nvvk::GraphicsPipelineGeneratorCombined gpb(device, p.layout, {});
   gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
   gpb.addShader(resampleShaderVert, VK_SHADER_STAGE_VERTEX_BIT);
   gpb.addShader(resampleShaderFrag, VK_SHADER_STAGE_FRAGMENT_BIT);
   p.pipeline = gpb.createPipeline();
 }
 
-void BakerVK::destroyResamplerPipeline()
+void ResamplerPipeline::destroy(VkDevice device)
 {
-  auto& p = m_resampling.pipeline;
-  vkDestroyPipeline(m_device, p.pipeline, nullptr);
-  vkDestroyPipelineLayout(m_device, p.layout, nullptr);
-  auto& d = m_resampling.descriptor;
-  vkDestroyDescriptorPool(m_device, d.pool, nullptr);
-  vkDestroyDescriptorSetLayout(m_device, d.layout, nullptr);
+  vkDestroyPipeline(device, pipeline.pipeline, nullptr);
+  vkDestroyPipelineLayout(device, pipeline.layout, nullptr);
+  vkDestroyDescriptorPool(device, descriptor.pool, nullptr);
+  vkDestroyDescriptorSetLayout(device, descriptor.layout, nullptr);
 }
 
 //--------------------------------------------------------------------------------------------------
 //
 //
-void BakerVK::runComputePass(const meshops::OpBake_input& info, bool finalBatch)
+void BakerPipeline::run(meshops::ContextVK& vk, const meshops::OpBake_input& input, glsl_shared::BakerPushConstants& pushConstants, bool finalBatch)
 {
-  ScopedTimer t("Run Compute Pass");
+  nvh::ScopedTimer t("Run Compute Pass");
 
-  nvvk::CommandPool cmdPool(m_device, m_queueC.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, m_queueC.queue);
+  nvvk::CommandPool cmdPool(vk.context->m_device, vk.queueC.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, vk.queueC.queue);
 
-  auto& p = m_pContainer;
-  auto& d = m_dContainer;
-
-  // Figuring out the offset for the distance vector
-  std::vector<uint32_t> distOffsets;
-  uint32_t              offset = 0;
-  distOffsets.push_back(offset);
+  auto& p = pipeline;
+  auto& d = descriptor;
 
   // Use the transform from the mesh's first instance
-  m_push.objectToWorld  = nvmath::mat4f(&info.baseMeshTransform.columns[0].x);
-  m_push.worldToObject  = nvmath::invert(m_push.objectToWorld);
-  m_push.primMeshID     = 0;
-  m_push.distOffset     = distOffsets[0];
-  m_push.lastBatch      = finalBatch ? 1 : 0;
-  uint32_t numTriangles = static_cast<uint32_t>(info.baseMeshView.triangleCount());
+  pushConstants.objectToWorld = nvmath::mat4f(&input.baseMeshTransform.columns[0].x);
+  pushConstants.worldToObject = nvmath::invert(pushConstants.objectToWorld);
+  pushConstants.lastBatch     = finalBatch ? 1 : 0;
+  uint32_t numTriangles       = static_cast<uint32_t>(input.baseMeshView.triangleCount());
 
   // Split up the draw calls into batches to avoid TDR/channel resets on long running jobs.
   uint32_t trianglesPerBatch = 1000;
@@ -977,9 +1006,9 @@ void BakerVK::runComputePass(const meshops::OpBake_input& info, bool finalBatch)
     vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &d.set, 0, nullptr);
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
 
-    uint32_t batchTriangles     = std::min(trianglesPerBatch, numTriangles - startTriangle);
-    m_push.baryTraceBatchOffset = startTriangle;
-    vkCmdPushConstants(cmdBuf, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushHighLow), &m_push);
+    uint32_t batchTriangles            = std::min(trianglesPerBatch, numTriangles - startTriangle);
+    pushConstants.baryTraceBatchOffset = startTriangle;
+    vkCmdPushConstants(cmdBuf, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BakerPushConstants), &pushConstants);
     vkCmdDispatch(cmdBuf, batchTriangles, 1, 1);
     cmdPool.submit(1, &cmdBuf);
   }
@@ -991,12 +1020,16 @@ void BakerVK::runComputePass(const meshops::OpBake_input& info, bool finalBatch)
   vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0,
                        nullptr, 0, nullptr);
   cmdPool.submitAndWait(cmdBuf);
-  m_alloc.finalizeAndReleaseStaging();
+  vk.resAllocator->finalizeAndReleaseStaging();
 }
 
-void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops::Texture> outputTextures)
+void ResamplerPipeline::run(meshops::ContextVK&              vk,
+                            const meshops::OpBake_input&     input,
+                            ArrayView<meshops::Texture>      outputTextures,
+                            glsl_shared::BakerPushConstants& pushConstants,
+                            nvvk::Buffer&                    triangleMinMaxBuf)
 {
-  ScopedTimer t("Run Resampler");
+  nvh::ScopedTimer t("Run Resampler");
   assert(outputTextures.size());
 
   glm::uvec2                     maxResolution{};
@@ -1008,26 +1041,25 @@ void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops:
     maxResolution = glm::max(maxResolution, resolution);
   }
 
-  auto& p = m_resampling.pipeline;
-  auto& d = m_resampling.descriptor;
+  auto& p = pipeline;
+  auto& d = descriptor;
 
-  m_push.objectToWorld         = nvmath::mat4f(&info.baseMeshTransform.columns[0].x);
-  m_push.worldToObject         = nvmath::invert(m_push.objectToWorld);
-  m_push.primMeshID            = 0;
-  m_push.numResampleTextures   = (uint32_t)outputTextures.size();
-  bool     generatingHeightmap = false;
-  uint32_t nextInputIndex      = 0;
-  for(uint32_t i = 0; i < m_push.numResampleTextures; ++i)
+  pushConstants.objectToWorld       = nvmath::mat4f(&input.baseMeshTransform.columns[0].x);
+  pushConstants.worldToObject       = nvmath::invert(pushConstants.objectToWorld);
+  pushConstants.numResampleTextures = (uint32_t)outputTextures.size();
+  bool     generatingHeightmap      = false;
+  uint32_t nextInputIndex           = 0;
+  for(uint32_t i = 0; i < pushConstants.numResampleTextures; ++i)
   {
-    if(info.resamplerInput[i].texture != nullptr)
+    if(input.resamplerInput[i].texture != nullptr)
     {
-      m_push.textureInfo[i].setInputIndex(nextInputIndex);
+      pushConstants.textureInfo[i].setInputIndex(nextInputIndex);
       nextInputIndex++;
     }
 
     // Set texture type
-    m_push.textureInfo[i].setTextureType(uint32_t(info.resamplerInput[i].textureType));
-    generatingHeightmap = generatingHeightmap || info.resamplerInput[i].textureType == TextureType::eHeightMap;
+    pushConstants.textureInfo[i].setTextureType(uint32_t(input.resamplerInput[i].textureType));
+    generatingHeightmap = generatingHeightmap || input.resamplerInput[i].textureType == TextureType::eHeightMap;
   }
 
   // If we're generating a heightmap during resampling, we should scale the
@@ -1035,15 +1067,16 @@ void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops:
   // values we would write. Instead, we can approximate the bounds by using the
   // already-computed micromesh displacement values. These do get computed in
   // meshops_bake.cpp, but this operation is not that common anyway.
-  m_push.globalMinMax = nvmath::vec2f(0.0f, 1.0f);
+  pushConstants.globalMinMax = nvmath::vec2f(0.0f, 1.0f);
   if(generatingHeightmap)
   {
-    auto minMaxs = ArrayView(static_cast<nvmath::vec2f*>(m_alloc.map(m_triangleMinMaxBuf)), info.baseMeshView.triangleCount());
-    if(!getGlobalMinMax(minMaxs, m_push.globalMinMax, false, 0))
+    auto minMaxs =
+        ArrayView(static_cast<nvmath::vec2f*>(vk.resAllocator->map(triangleMinMaxBuf)), input.baseMeshView.triangleCount());
+    if(!getGlobalMinMax(minMaxs, pushConstants.globalMinMax, false, 0))
     {
-      m_push.globalMinMax = {0.0f, 1.0f};
+      pushConstants.globalMinMax = {0.0f, 1.0f};
     }
-    m_alloc.unmap(m_triangleMinMaxBuf);
+    vk.resAllocator->unmap(triangleMinMaxBuf);
   }
 
   // Create a list of resolutions. Each geometry instance will be rasterized at
@@ -1051,17 +1084,18 @@ void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops:
   // order doesn't matter.
   size_t nextResolution = 0;
   for(auto resolution : uniqueResolutions)
-    m_push.resampleInstanceResolutions[nextResolution++] = (resolution.y << 16) | resolution.x;
-  m_push.resampleMaxResolution = (maxResolution.y << 16) | maxResolution.x;
-  uint32_t instances           = uint32_t(uniqueResolutions.size());
+    pushConstants.resampleInstanceResolutions[nextResolution++] = (resolution.y << 16) | resolution.x;
+  pushConstants.resampleMaxResolution = (maxResolution.y << 16) | maxResolution.x;
+  uint32_t instances                  = uint32_t(uniqueResolutions.size());
 
-  nvvk::CommandPool cmdPool(m_device, m_queueGCT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, m_queueGCT.queue);
+  nvvk::CommandPool cmdPool(vk.context->m_device, vk.queueGCT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                            vk.queueGCT.queue);
 
   // Indices are fetched by the vertex shader
   // Split up the draw calls into batches to avoid TDR/channel resets on long running jobs.
   // TODO: use proper graphics pipeline for vertex reuse
   uint32_t trianglesPerBatch = 1000;
-  uint32_t totalTriangles    = static_cast<uint32_t>(info.baseMeshView.triangleCount());
+  uint32_t totalTriangles    = static_cast<uint32_t>(input.baseMeshView.triangleCount());
   for(uint32_t triOffset = 0; triOffset < totalTriangles; triOffset += trianglesPerBatch)
   {
     VkCommandBuffer cmdBuf = cmdPool.createCommandBuffer();
@@ -1077,7 +1111,7 @@ void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops:
     VkRect2D scissor{{0, 0}, {maxResolution.x, maxResolution.y}};
     vkCmdSetScissor(cmdBuf, 0, 1, &scissor);
 
-    vkCmdPushConstants(cmdBuf, p.layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(PushHighLow), &m_push);
+    vkCmdPushConstants(cmdBuf, p.layout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, sizeof(BakerPushConstants), &pushConstants);
     vkCmdBindDescriptorSets(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout, 0, 1, &d.set, 0, nullptr);
     vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
 
@@ -1103,33 +1137,19 @@ void BakerVK::runResampler(const meshops::OpBake_input& info, ArrayView<meshops:
                        0, 1, &barrier, 0, nullptr, 0, nullptr);
 
   cmdPool.submitAndWait(cmdBuf);
-  m_alloc.finalizeAndReleaseStaging();
+  vk.resAllocator->finalizeAndReleaseStaging();
 }
 
-void BakerVK::fitDirectionBounds(const meshops::OpBake_input& info, MutableArrayView<float> distances)
+void BakerVK::fitDirectionBounds(const meshops::OpBake_input& input, MutableArrayView<float> distances)
 {
   // TODO: implement nvvk::ResourceAllocator::map() with a range
-  ScopedTimer                 t("Fit min/max bounds");
-  auto&                       meshView = info.baseMeshView;
-  micromesh::MeshTopologyUtil topo(*info.baseMeshTopology);
-  auto minMaxs = ArrayView(static_cast<nvmath::vec2f*>(m_alloc.map(m_triangleMinMaxBuf)), meshView.triangleCount());
-  auto directionBounds = ArrayView(static_cast<nvmath::vec2f*>(m_alloc.map(m_directionBoundsBuf)), meshView.vertexCount());
-
-#if 0
-  // Brute force min/max
-  {
-    auto distancesGpu = static_cast<float*>(m_alloc.map(m_distanceBuf));
-    size_t dist = 0;
-    for(size_t i = 0; i < info.baseMeshView.triangleSubdivisionLevels.size(); ++i)
-    {
-      uint32_t microVertices = bary::baryValueFrequencyGetCount(bary::ValueFrequency::ePerVertex, info.baseMeshView.triangleSubdivisionLevels[i]);
-      auto minMax = std::minmax_element(distancesGpu + dist, distancesGpu + dist + microVertices);
-      minMaxs[i] = {*minMax.first, *minMax.second};
-      dist += microVertices;
-    }
-    m_alloc.unmap(m_distanceBuf);
-  }
-#endif
+  nvh::ScopedTimer            t("Fit min/max bounds");
+  auto&                       meshView = input.baseMeshView;
+  micromesh::MeshTopologyUtil topo(*input.baseMeshTopology);
+  auto minMaxs = ArrayView(static_cast<nvmath::vec2f*>(m_vk.resAllocator->map(m_triangleMinMaxBuf)), meshView.triangleCount());
+  auto directionBounds =
+      ArrayView(static_cast<nvmath::vec2f*>(m_vk.resAllocator->map(m_baseVk.directionBoundsBuf)), meshView.vertexCount());
+  uint32_t threadCount = micromesh::micromeshOpContextGetConfig(m_micromeshContext).threadCount;
 
   // Compute min/max distances for each vertex as the min/max distance in adjacent triangles. The adjacent triangles are
   // only position-unique, which may produce more relaxed bounds than if a position+direction unique topology were
@@ -1161,7 +1181,7 @@ void BakerVK::fitDirectionBounds(const meshops::OpBake_input& info, MutableArray
         // Update the bounds based on the new min/maxes. The min/max values are distance relative to within the bounds,
         // i.e. a uniDirectional min of 0.0 and a max of 1.0 means use the current bounds as-is. These new bounds will
         // be used in a second pass of the baker, since points at the displacement bounds form new direction vectors
-        // when interpolated. Depending on info.uniDirectional, values may be negative and outside the segment. Nothing
+        // when interpolated. Depending on input.uniDirectional, values may be negative and outside the segment. Nothing
         // special is needed for bi-directional tracing here since the trace bounds are found by intersecting the
         // initial displacement bounds. In that case, the first iteration will produce values near [-1, 1] and
         // subsequent passes should produce [0, 1].
@@ -1170,10 +1190,10 @@ void BakerVK::fitDirectionBounds(const meshops::OpBake_input& info, MutableArray
         biasScale *= BiasScalef::minmax_unit(adjMinMax);
         directionBounds[vertIdx] = {biasScale.bias, std::max(epsilon, biasScale.scale)};
       },
-      m_threadCount);
+      threadCount);
 
   // Copy direction bounds from position-unique/watertight vertices.
-  auto wtTriangleVertices = ArrayView<nvmath::vec3ui>(makeArrayView(info.baseMeshTopology->triangleVertices));
+  auto wtTriangleVertices = ArrayView<nvmath::vec3ui>(makeArrayView(input.baseMeshTopology->triangleVertices));
   nvh::parallel_batches(
       meshView.triangleCount(),
       [&](uint64_t triIdx) {
@@ -1186,22 +1206,22 @@ void BakerVK::fitDirectionBounds(const meshops::OpBake_input& info, MutableArray
           directionBounds[tri.z] = directionBounds[triWt.z];
         }
       },
-      m_threadCount);
+      threadCount);
 
   // Restore distances for the next pass
-  auto distancesGpu = ArrayView(static_cast<float*>(m_alloc.map(m_distanceBuf)), distances.size());
+  auto distancesGpu = ArrayView(static_cast<float*>(m_vk.resAllocator->map(m_distanceBuf)), distances.size());
   std::fill(distancesGpu.data(), distancesGpu.data() + distancesGpu.size(), std::numeric_limits<float>::max());
-  m_alloc.unmap(m_distanceBuf);
+  m_vk.resAllocator->unmap(m_distanceBuf);
 
   // Restore min/maxes for the next pass
   std::fill(minMaxs.begin(), minMaxs.end(),
             nvmath::vec2f(std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()));
 
-  m_alloc.unmap(m_directionBoundsBuf);
-  m_alloc.unmap(m_triangleMinMaxBuf);
+  m_vk.resAllocator->unmap(m_baseVk.directionBoundsBuf);
+  m_vk.resAllocator->unmap(m_triangleMinMaxBuf);
 }
 
-bool BakerVK::getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs, nvmath::vec2f& globalMinMax, bool filterZeroToOne, const uint32_t maxFilterWarnings)
+static bool getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs, nvmath::vec2f& globalMinMax, bool filterZeroToOne, const uint32_t maxFilterWarnings)
 {
   // Compute min/max distances for the whole scene. Since direction bounds
   // fitting is a numerical root finding method, there is always a chance some
@@ -1240,36 +1260,22 @@ bool BakerVK::getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs, nvmath::ve
 //--------------------------------------------------------------------------------------------------
 // Retrieve the distances that was computed
 //
-void BakerVK::getDistanceFromBuffer(const meshops::OpBake_input&    info,
+void BakerVK::getDistanceFromBuffer(const meshops::OpBake_input&    input,
                                     MutableArrayView<nvmath::vec2f> outDirectionBounds,
                                     MutableArrayView<float>         distances,
                                     MutableArrayView<nvmath::vec2f> triangleMinMaxs,
                                     nvmath::vec2f&                  globalMinMax)
 {
-  ScopedTimer t("Get Distance Buffer");
-  const float epsilon = 1e-6F;
-  auto&       meshView = info.baseMeshView;
-  auto minMaxs = ArrayView(static_cast<nvmath::vec2f*>(m_alloc.map(m_triangleMinMaxBuf)), info.baseMeshView.triangleCount());
+  nvh::ScopedTimer t("Get Distance Buffer");
+  const float      epsilon     = 1e-6F;
+  auto&            meshView    = input.baseMeshView;
+  auto             minMaxs     = ArrayView(static_cast<nvmath::vec2f*>(m_vk.resAllocator->map(m_triangleMinMaxBuf)),
+                                           input.baseMeshView.triangleCount());
+  uint32_t         threadCount = micromesh::micromeshOpContextGetConfig(m_micromeshContext).threadCount;
 
-#if 0
-  // Brute force min/max
+  if(input.settings.fitDirectionBounds || !m_push.hasDirectionBounds)
   {
-    auto distancesGpu = static_cast<float*>(m_alloc.map(m_distanceBuf));
-    size_t dist = 0;
-    for(size_t i = 0; i < info.baseMeshView.triangleSubdivisionLevels.size(); ++i)
-    {
-      uint32_t microVertices = bary::baryValueFrequencyGetCount(bary::ValueFrequency::ePerVertex, info.baseMeshView.triangleSubdivisionLevels[i]);
-      auto minMax = std::minmax_element(distancesGpu + dist, distancesGpu + dist + microVertices);
-      minMaxs[i] = {*minMax.first, *minMax.second};
-      dist += microVertices;
-    }
-    m_alloc.unmap(m_distanceBuf);
-  }
-#endif
-
-  if(info.settings.fitDirectionBounds || !m_push.hasDirectionBounds)
-  {
-    if(!getGlobalMinMax(minMaxs, globalMinMax, info.settings.fitDirectionBounds, 5))
+    if(!getGlobalMinMax(minMaxs, globalMinMax, input.settings.fitDirectionBounds, 5))
     {
       LOGW("Warning: All triangle bounds were filtered. Displacements will all be clamped\n");
       globalMinMax = {0.0f, 1.0f};
@@ -1284,7 +1290,7 @@ void BakerVK::getDistanceFromBuffer(const meshops::OpBake_input&    info,
   }
 
   BiasScalef globalBiasScale{};
-  if(info.settings.fitDirectionBounds)
+  if(input.settings.fitDirectionBounds)
   {
     globalBiasScale       = BiasScalef::minmax_unit(globalMinMax);
     globalBiasScale.scale = std::max(epsilon, globalBiasScale.scale);
@@ -1307,9 +1313,9 @@ void BakerVK::getDistanceFromBuffer(const meshops::OpBake_input&    info,
     }
   }
 
-  m_alloc.unmap(m_triangleMinMaxBuf);
+  m_vk.resAllocator->unmap(m_triangleMinMaxBuf);
 
-  auto distancesGpu = static_cast<float*>(m_alloc.map(m_distanceBuf));
+  auto distancesGpu = static_cast<float*>(m_vk.resAllocator->map(m_distanceBuf));
   nvh::parallel_batches(
       distances.size(),
       [&](uint64_t idx) {
@@ -1323,19 +1329,19 @@ void BakerVK::getDistanceFromBuffer(const meshops::OpBake_input&    info,
         distances[idx] = m_push.hasDirectionBounds ? std::max(0.0f, std::min(1.0f, normalized)) : distance;
         assert(!std::isnan(distances[idx]));
       },
-      m_threadCount);
-  m_alloc.unmap(m_distanceBuf);
+      threadCount);
+  m_vk.resAllocator->unmap(m_distanceBuf);
 
   // Only rewrite the direction bounds if they were modified.
-  if(info.settings.fitDirectionBounds)
+  if(input.settings.fitDirectionBounds)
   {
-    nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(m_alloc.map(m_directionBoundsBuf));
+    nvmath::vec2f* directionBounds = static_cast<nvmath::vec2f*>(m_vk.resAllocator->map(m_baseVk.directionBoundsBuf));
     for(size_t i = 0; i < outDirectionBounds.size(); ++i)
     {
       auto bounds           = BiasScalef(directionBounds[i]) * globalBiasScale;
       outDirectionBounds[i] = {bounds.bias, std::max(epsilon, bounds.scale)};
     }
-    m_alloc.unmap(m_directionBoundsBuf);
+    m_vk.resAllocator->unmap(m_baseVk.directionBoundsBuf);
   }
 }
 

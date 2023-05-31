@@ -14,6 +14,10 @@
 #define IM_VEC2_CLASS_EXTRA ImVec2(const nvmath::vec2f& f) {x = f.x; y = f.y;} operator nvmath::vec2f() const { return nvmath::vec2f(x, y); }
 // clang-format on
 
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS
+#endif
+
 #include <thread>
 
 #include "toolbox_viewer.hpp"
@@ -40,6 +44,7 @@
 #include "ui/ui_raytracing.hpp"
 #include "ui/ui_rendering.hpp"
 #include "ui/ui_statistics.hpp"
+#include "ui/ui_utilities.hpp"
 
 
 extern std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;
@@ -288,28 +293,25 @@ void ToolboxViewer::onFileDrop(const char* filename)
   if(m_settings.activtyStatus.isBusy())
     return;
 
-  namespace fs = std::filesystem;
-  m_settings.activtyStatus.activate("Loading File");
+  namespace fs            = std::filesystem;
   const std::string tfile = filename;
 
   vkDeviceWaitIdle(m_device);
 
-  std::thread([&, tfile]() {
-    const std::string extension = fs::path(tfile).extension().string();
-    if(extension == ".gltf" || extension == ".glb" || extension == ".obj")
-    {
-      m_settings.geometryView.slot  = ViewerSettings::eReference;
-      m_settings.geometryView.baked = false;
-      createScene(tfile, SceneVersion::eReference);
-    }
-    else if(extension == ".hdr")
-    {
-      createHdr(tfile);
-      m_settings.envSystem = ViewerSettings::eHdr;
-    }
-
-    m_settings.activtyStatus.stop();
-  }).detach();
+  const std::string extension = fs::path(tfile).extension().string();
+  if(extension == ".gltf" || extension == ".glb" || extension == ".obj")
+  {
+    m_settings.geometryView.slot  = ViewerSettings::eReference;
+    m_settings.geometryView.baked = false;
+    m_settings.activtyStatus.activate("Loading Scene");
+    m_loadingScene = std::async([this, tfile]() { return createScene(tfile, SceneVersion::eReference); });
+  }
+  else if(extension == ".hdr")
+  {
+    m_settings.envSystem = ViewerSettings::eSky;
+    m_settings.activtyStatus.activate("Loading Environment");
+    m_loadingHdr = std::async([this, tfile]() { return createHdr(tfile); });
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -318,8 +320,6 @@ void ToolboxViewer::onFileDrop(const char* filename)
 //
 void ToolboxViewer::onUIRender()
 {
-  using PE = ImGuiH::PropertyEditor;
-
   // Ui Elements
   static UiMicromeshProcess         micro_process(this);
   static UiMicromeshProcessPipeline micro_process_pipeline(this);
@@ -443,6 +443,8 @@ void ToolboxViewer::onUIRender()
   }
 
   showBusyWindow(m_settings.activtyStatus.status());
+
+  ImGuiH::ErrorMessageRender();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -516,6 +518,28 @@ bool ToolboxViewer::keyShortcuts()
 //
 void ToolboxViewer::onRender(VkCommandBuffer cmd)
 {
+  // Handle completed load jobs
+  if(m_loadingScene.valid() && m_loadingScene.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+  {
+    if(!m_loadingScene.get())
+    {
+      ImGuiH::ErrorMessageShow("Failed to load scene.\nCheck the log for details\n\n");
+    }
+    m_settings.activtyStatus.stop();
+  }
+  if(m_loadingHdr.valid() && m_loadingHdr.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+  {
+    if(m_loadingHdr.get())
+    {
+      m_settings.envSystem = ViewerSettings::eHdr;
+    }
+    else
+    {
+      ImGuiH::ErrorMessageShow("Failed to load HDR image.\nCheck the log for details\n\n");
+    }
+    m_settings.activtyStatus.stop();
+  }
+
   ToolboxScene* toolbox_scene = getScene(m_settings.geometryView.slot);
 
   if(!toolbox_scene->valid())
@@ -570,6 +594,24 @@ void ToolboxViewer::onRender(VkCommandBuffer cmd)
   m_profilerVk->endFrame();
 }
 
+void ToolboxViewer::waitForLoad()
+{
+  if(m_loadingScene.valid())
+  {
+    m_loadingScene.wait();
+  }
+  if(m_loadingHdr.valid())
+  {
+    m_loadingHdr.wait();
+  }
+
+  // HACK: the activtyStatus is used as a global mutex for async operations.
+  // onFileDrop() would ignore successive drop()+wait() calls without disabling
+  // it here.
+  m_settings.activtyStatus.stop();
+  m_settings.activtyStatus.updateState();
+}
+
 void ToolboxViewer::updateHbao()
 {
   // hbao setup
@@ -600,10 +642,14 @@ void ToolboxViewer::updateFrameInfo(VkCommandBuffer cmd)
   m_frameInfo.proj         = nvmath::perspectiveVK(CameraManip.getFov(), m_gBuffers->getAspectRatio(), clip.x, clip.y);
   m_frameInfo.projInv      = nvmath::inverse(m_frameInfo.proj);
   m_frameInfo.viewInv      = nvmath::inverse(m_frameInfo.view);
+  m_frameInfo.resolution   = {m_gBuffers->getSize().width, m_gBuffers->getSize().height};
   m_frameInfo.metallic     = m_settings.metallic;
   m_frameInfo.roughness    = m_settings.roughness;
   m_frameInfo.colormap     = m_settings.colormap;
   m_frameInfo.vectorLength = m_settings.vectorLength;
+  m_frameInfo.heightmapSubdivLevel = m_settings.heightmapSubdivLevel;
+  m_frameInfo.heightmapScale       = m_settings.heightmapScale;
+  m_frameInfo.heightmapOffset      = m_settings.heightmapOffset;
 
   vec3 linear = toLinear(vec3(m_settings.overlayColor.x, m_settings.overlayColor.y, m_settings.overlayColor.z));
   m_frameInfo.overlayColor = ImGui::ColorConvertFloat4ToU32({linear.x, linear.y, linear.z, 1.0F});
@@ -656,6 +702,17 @@ void ToolboxViewer::updateDirty()
   if(toolbox_scene->isDirty(SceneDirtyFlags::eDeviceMesh))
   {
     toolbox_scene->createVulkanBuffers();
+
+    // This path should be triggered whenever a scene is modified, e.g. baked.
+    // If the updated scene contains Bary data but there are no normal map, we
+    // use faceted rendering, otherwise there is no microvertex normal data.
+    bool viewingMicromap    = toolbox_scene->hasBary() && m_settings.geometryView.baked;
+    bool requiresNormalMaps = viewingMicromap && (m_settings.shading == eRenderShading_default);
+    if(requiresNormalMaps && !toolbox_scene->stats()->normalmaps)
+    {
+      m_settings.shading = eRenderShading_faceted;
+      LOGI("Switching to faceted rendering as there are no normal maps\n");
+    }
   }
 
 
@@ -741,13 +798,13 @@ void ToolboxViewer::saveScene(const std::string& filename, SceneVersion s)
 // - m_sceneVk holds the glTF scene on the GPU in Vulkan buffers
 // - m_sceneRtx has the Vulkan acceleration structure of the glTF
 //
-void ToolboxViewer::createScene(const std::string& filename, SceneVersion sceneVersion)
+bool ToolboxViewer::createScene(const std::string& filename, SceneVersion sceneVersion)
 {
   ToolboxScene* toolbox_scene = getScene(sceneVersion);
-  toolbox_scene->createFromFile(filename);
+  if(!toolbox_scene->createFromFile(filename))
+    return false;
 
-  if(!toolbox_scene->valid())
-    return;
+  assert(toolbox_scene->valid());
 
   // When loading a new reference, we are not keeping the Base
   // TL: I think it isn't a good idea. We should be able to keep the Base
@@ -757,20 +814,13 @@ void ToolboxViewer::createScene(const std::string& filename, SceneVersion sceneV
   // Find the size of the vectors (normals, directions) for raster rendering
   m_settings.vectorLength = toolbox_scene->getDimensions()->radius * 0.01F;
 
-  // If the scene we are loading contains Bary data, we want to display it
-  // and if there are no normal map, we use the faceted mode.
+  // If the scene we are loading contains Bary data, we want to display it.
   if(toolbox_scene->hasBary())
   {
     m_settings.geometryView.baked = true;
-
-    bool has_normalmap = false;
-    for(auto& mat : toolbox_scene->getToolScene()->materials())
-    {
-      has_normalmap |= mat.normalTexture.index > -1;
-    }
-    if(has_normalmap == false)
-      m_settings.shading = eRenderShading_faceted;
   }
+
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -779,6 +829,8 @@ void ToolboxViewer::createScene(const std::string& filename, SceneVersion sceneV
 void ToolboxViewer::createGbuffers(const nvmath::vec2f& size)
 {
   static VkFormat depth_format = nvvk::findDepthFormat(m_app->getPhysicalDevice());  // Not all depth are supported
+
+  vkDeviceWaitIdle(m_device);
 
   m_viewSize = size;
 
@@ -793,7 +845,8 @@ void ToolboxViewer::createGbuffers(const nvmath::vec2f& size)
   // Two GBuffers: RGBA8 and RGBA32F, rendering to RGBA32F and tone mapped to RGBA8
   const std::vector<VkFormat> color_buffers = {m_ldrFormat, m_resultFormat};
   // Creation of the GBuffers
-  m_gBuffers->destroy();
+  if(m_gBuffers->getSize().width != 0U)
+    m_gBuffers->destroy();
   m_gBuffers->create(buffer_size, color_buffers, depth_format);
 
   m_sky->setOutImage(m_gBuffers->getDescriptorImageInfo(eResult));
@@ -986,24 +1039,38 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
 
   const std::unique_ptr<micromesh_tool::ToolScene>&                tool_scene    = toolbox_scene->getToolScene();
   const std::unique_ptr<ToolboxSceneVk>&                           tool_scene_vk = toolbox_scene->getToolSceneVK();
-  meshops::ArrayView<micromesh_tool::ToolScene::PrimitiveInstance> prim_inst     = tool_scene->instances();
+  meshops::ArrayView<micromesh_tool::ToolScene::Instance>          instances     = tool_scene->instances();
   const std::vector<std::unique_ptr<micromesh_tool::ToolMesh>>&    meshes        = tool_scene->meshes();
   const nvvkhl::PipelineContainer&                                 pipeline      = toolbox_scene->getRasterPipeline();
 
   for(const uint32_t& node_id : nodeIDs)
   {
-    const micromesh_tool::ToolScene::PrimitiveInstance& instance   = prim_inst[node_id];
-    uint32_t                                            ref_id     = instance.primMeshRef;
-    const std::unique_ptr<micromesh_tool::ToolMesh>&    mesh       = meshes[ref_id];
-    int32_t                                             baryIndex  = mesh->relations().bary;
-    int32_t                                             groupIndex = mesh->relations().group;
+    const micromesh_tool::ToolScene::Instance&       instance      = instances[node_id];
+    uint32_t                                         ref_id        = instance.mesh;
+    const std::unique_ptr<micromesh_tool::ToolMesh>& mesh          = meshes[ref_id];
+    int32_t                                          baryIndex     = mesh->relations().bary;
+    int32_t                                          groupIndex    = mesh->relations().group;
+    int32_t                                          materialIndex = mesh->relations().material;
 
-    m_pushConst.materialID     = std::max(0, prim_inst[node_id].material);
+    int   heightmapImage;
+    float heightmapBias;
+    float heightmapScale;
+    bool  hasHeightmap = tool_scene->getHeightmap(materialIndex, heightmapBias, heightmapScale, heightmapImage);
+
+    // ToolboxSceneVk::createMaterialBuffer() adds an extra element with the
+    // scene's default material.
+    if(materialIndex == -1)
+    {
+      materialIndex = static_cast<int>(tool_scene->materials().size());
+    }
+
+    m_pushConst.materialID     = materialIndex;
     m_pushConst.instanceID     = static_cast<int>(node_id);
     m_pushConst.primMeshID     = static_cast<int>(ref_id);
     m_pushConst.microMax       = 0;
     m_pushConst.microScaleBias = {1.0f, 0.0f};
     m_pushConst.baryInfoID     = 0;
+    m_pushConst.triangleCount  = 0;
 
     const meshops::DeviceMesh& device_mesh  = tool_scene_vk->deviceMesh(ref_id);
     meshops::DeviceMeshVK*     device_vk    = meshops::meshopsDeviceMeshGetVK(device_mesh);
@@ -1017,6 +1084,7 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
 
     if(useMeshTask)
     {
+      // Rendering either bary displacement or heightmap displacement
       if(baryIndex != -1 && groupIndex != -1)
       {
         const bary::BasicView&             basic     = tool_scene->barys()[baryIndex]->groups()[groupIndex].basic;
@@ -1044,6 +1112,17 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
           int numWorkgroups    = (numBaseTriangles + MICRO_GROUP_SIZE - 1) / MICRO_GROUP_SIZE;
           vkCmdDrawMeshTasksNV(cmd, numWorkgroups, 0);
         }
+      }
+      else if(hasHeightmap)
+      {
+        int numBaseTriangles      = index_count / 3;
+        m_pushConst.triangleCount = numBaseTriangles;
+
+        // The heightmap image, bias, scale etc. are already on the material
+        vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(PushConstant), &m_pushConst);
+
+        int numWorkgroups = (numBaseTriangles + MICRO_GROUP_SIZE - 1) / MICRO_GROUP_SIZE;
+        vkCmdDrawMeshTasksNV(cmd, numWorkgroups, 0);
       }
     }
     else
@@ -1076,7 +1155,6 @@ void ToolboxViewer::renderRasterScene(VkCommandBuffer cmd)
   const nvvkhl::PipelineContainer& overlay_pipeline = overlay_scene->getRasterPipeline();
   const nvvkhl::PipelineContainer& shell_pipeline   = shell_scene->getRasterPipeline();
 
-
   const VkExtent2D& render_size = m_gBuffers->getSize();
 
   const VkViewport viewport{0.0F, 0.0F, static_cast<float>(render_size.width), static_cast<float>(render_size.height),
@@ -1103,10 +1181,18 @@ void ToolboxViewer::renderRasterScene(VkCommandBuffer cmd)
       renderNodes(cmd, nodes, toolbox_scene, 0, 0, true /*use mesh*/);
     }
 
+    // Heightmaps
+    {
+      std::vector<uint32_t> nodes = toolbox_scene->getNodes(SceneNodeMethods::eAll, SceneNodeMicromesh::eHeightmapNoMicromesh);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.plines[RasterPipelines::eRasterPipelineHeightmapSolid]);
+      renderNodes(cmd, nodes, toolbox_scene, 0, 0, true /*use mesh*/);
+    }
+
     //
     {
       // Draw solid
-      SceneNodeMicromesh micro_method = use_bake ? SceneNodeMicromesh::eMicromeshWithout : SceneNodeMicromesh::eMicromeshDontCare;
+      SceneNodeMicromesh micro_method =
+          use_bake ? SceneNodeMicromesh::eNoHeightmapNoMicromesh : SceneNodeMicromesh::eNoHeightmapBothMicromesh;
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.plines[RasterPipelines::eRasterPipelineSolid]);
       std::vector<uint32_t> solid_nodes = toolbox_scene->getNodes(SceneNodeMethods::eSolid, micro_method);
       renderNodes(cmd, solid_nodes, toolbox_scene);
@@ -1133,8 +1219,16 @@ void ToolboxViewer::renderRasterScene(VkCommandBuffer cmd)
       renderNodes(cmd, nodes, overlay_scene, 0, 0, true);
     }
 
+    // Wireframe Heightmaps
     {
-      SceneNodeMicromesh micro_method = use_bake ? SceneNodeMicromesh::eMicromeshWithout : SceneNodeMicromesh::eMicromeshDontCare;
+      std::vector<uint32_t> nodes = overlay_scene->getNodes(SceneNodeMethods::eAll, SceneNodeMicromesh::eHeightmapNoMicromesh);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.plines[RasterPipelines::eRasterPipelineHeightmapWire]);
+      renderNodes(cmd, nodes, overlay_scene, 0, 0, true /*use mesh*/);
+    }
+
+    {
+      SceneNodeMicromesh micro_method =
+          use_bake ? SceneNodeMicromesh::eNoHeightmapNoMicromesh : SceneNodeMicromesh::eNoHeightmapBothMicromesh;
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, overlay_pipeline.plines[RasterPipelines::eRasterPipelineWire]);
       renderNodes(cmd, overlay_scene->getNodes(SceneNodeMethods::eAll, micro_method), overlay_scene);
     }
@@ -1226,7 +1320,7 @@ void ToolboxViewer::rasterScene(VkCommandBuffer cmd)
 //--------------------------------------------------------------------------------------------------
 // Loading an HDR image, create the acceleration structure used by the path tracer and
 // create a convoluted version of it (Dome) used by the raster.
-void ToolboxViewer::createHdr(const std::string& filename)
+bool ToolboxViewer::createHdr(const std::string& filename)
 {
   auto lock = GetVkQueueOrAllocatorLock();
 
@@ -1238,7 +1332,6 @@ void ToolboxViewer::createHdr(const std::string& filename)
   m_hdrDome->create(m_hdrEnv->getDescriptorSet(), m_hdrEnv->getDescriptorSetLayout());
   m_hdrDome->setOutImage(m_gBuffers->getDescriptorImageInfo(eResult));
 
-
   for(auto& s : m_scenes)
   {
     s->setDirty(eDescriptorSets);
@@ -1246,6 +1339,7 @@ void ToolboxViewer::createHdr(const std::string& filename)
   }
 
   m_frameInfo.maxLuminance = m_hdrEnv->getIntegral();  // Remove firefly
+  return m_hdrEnv->isValid();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1413,8 +1507,6 @@ void ToolboxViewer::rtxPicking(const ImVec2& mousePosNorm)
   nvmath::vec3f       up;
   CameraManip.getLookat(eye, center, up);
   CameraManip.setLookat(eye, world_pos, up, false);
-
-  auto float_as_uint = [](float f) { return *reinterpret_cast<uint32_t*>(&f); };
 
   // Logging picking info.
   const std::unique_ptr<micromesh_tool::ToolScene>& tool_scene = toolbox_scene->getToolScene();

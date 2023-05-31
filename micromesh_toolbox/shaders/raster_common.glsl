@@ -144,14 +144,14 @@ vec3 getIBLContribution(vec3 n, vec3 v, float roughness, vec3 diffuseColor, vec3
   return diffuse + specular;
 }
 
-void getTriangleVertex(in uint64_t vertexAddress, in uint64_t indexAddress, out Vertex v[3])
+void getTriangleVertex(in uint64_t vertexAddress, in uint64_t indexAddress, int triangle, out Vertex v[3])
 {
   // Vextex and indices of the primitive
   Vertices vertices = Vertices(vertexAddress);
   Indices  indices  = Indices(indexAddress);
 
   // Getting the 3 indices of the triangle (local)
-  uvec3 triangleIndex = indices.i[gl_PrimitiveID];
+  uvec3 triangleIndex = indices.i[triangle];
 
   // All vertex attributes of the triangle.
   v[0].position = vertices.v[triangleIndex.x].xyz;
@@ -159,7 +159,7 @@ void getTriangleVertex(in uint64_t vertexAddress, in uint64_t indexAddress, out 
   v[2].position = vertices.v[triangleIndex.z].xyz;
 }
 
-void getDirectionVertex(in uint64_t directionAddress, in uint64_t indexAddress, out vec3 d[3])
+void getDirectionVertex(in uint64_t directionAddress, in uint64_t indexAddress, int triangle, out vec3 d[3])
 {
   if(directionAddress == 0)
     return;
@@ -169,7 +169,7 @@ void getDirectionVertex(in uint64_t directionAddress, in uint64_t indexAddress, 
   Indices    indices    = Indices(indexAddress);
 
   // Getting the 3 indices of the triangle (local)
-  uvec3 triangleIndex = indices.i[gl_PrimitiveID];
+  uvec3 triangleIndex = indices.i[triangle];
 
   // All vertex attributes of the triangle.
   d[0] = directions.v[triangleIndex.x].xyz;
@@ -252,7 +252,7 @@ vec3 uintToColor(uint val)
 //-----------------------------------------------------------------------
 // This function finds the material and hi information
 //
-void rasterLoad(vec3 baryCoord, out GltfShadeMaterial gltfMat, out DeviceMeshInfo pinfo, out TriangleAttribute triInfo, out HitState hit, out vec3 toEye)
+void rasterLoad(vec3 position, vec3 baryCoord, int triangle, out GltfShadeMaterial gltfMat, out DeviceMeshInfo pinfo, out TriangleAttribute triInfo, out HitState hit, out vec3 toEye)
 {
   // Material of the object
   GltfMaterials gltfMats = GltfMaterials(sceneDesc.materialAddress);
@@ -268,23 +268,20 @@ void rasterLoad(vec3 baryCoord, out GltfShadeMaterial gltfMat, out DeviceMeshInf
 
 
   // Triangle information
-  int triID = gl_PrimitiveID;
   triInfo   = TriangleAttribute(uint16_t(0), uint8_t(0), uint8_t(0));
 
   if(pinfo.triangleAttributesBuffer != 0)
   {
     TriangleAttributes tris = TriangleAttributes(pinfo.triangleAttributesBuffer);
-    triInfo                 = tris.bt[triID];
+    triInfo                 = tris.bt[triangle];
   }
 
-
-  hit.pos = IN.pos;
-
   const vec3 eyePos            = vec3(frameInfo.viewInv[3].x, frameInfo.viewInv[3].y, frameInfo.viewInv[3].z);
-  const vec3 worldRayDirection = normalize(hit.pos - eyePos);
+  const vec3 worldRayDirection = normalize(position - eyePos);
   toEye                        = -worldRayDirection;
 
-  hit = getHitState(pinfo, baryCoord, gl_PrimitiveID, mat4x3(instinfo.objectToWorld), mat4x3(instinfo.worldToObject), worldRayDirection, gl_FrontFacing);
+  hit = getHitState(pinfo, baryCoord, gl_PrimitiveID, mat4x3(instinfo.objectToWorld), mat4x3(instinfo.worldToObject),
+                    worldRayDirection, gl_FrontFacing);
 }
 
 
@@ -298,16 +295,16 @@ void rasterLoad(vec3 baryCoord, out GltfShadeMaterial gltfMat, out DeviceMeshInf
 //    /         \ 
 // bary.x __0_ bary.y
 //
-vec3 subdDecFlagsToColor(uint subdLevel, uint primitiveFlags, vec3 bary)
+vec3 subdDecFlagsToColor(uint subdLevel, int subdMax, uint primitiveFlags, vec3 bary)
 {
   float threshold = 0.1f;  // Edge size
 
-  vec3 coreColor = colorMap(frameInfo.colormap, float(subdLevel) / MAX_BASE_SUBDIV);
+  vec3 coreColor = colorMap(frameInfo.colormap, float(subdLevel) / float(subdMax));
 
   if(subdLevel == 0)
     return coreColor;
 
-  vec3 decColor = colorMap(frameInfo.colormap, float(subdLevel - 1) / MAX_BASE_SUBDIV);
+  vec3 decColor = colorMap(frameInfo.colormap, float(subdLevel - 1) / float(subdMax));
 
   if(bary.x < threshold || bary.y < threshold || bary.z < threshold)
   {
@@ -347,7 +344,7 @@ vec3 subdDecFlagsToColor(uint subdLevel, uint primitiveFlags, vec3 bary)
 //-----------------------------------------------------------------------
 // This returns the shading for the wanted sahded mode
 //
-vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshInfo pinfo, in TriangleAttribute triInfo, in HitState hit, in vec3 toEye)
+vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshInfo pinfo, in TriangleAttribute triInfo, in HitState hit, in vec3 toEye, int triangle)
 {
   float NdotL = dot(hit.nrm, toEye);
 
@@ -359,7 +356,7 @@ vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshI
 
     case eRenderShading_anisotropy: {
       Vertex v[3];
-      getTriangleVertex(pinfo.vertexPositionNormalBuffer, pinfo.triangleVertexIndexBuffer, v);
+      getTriangleVertex(pinfo.vertexPositionNormalBuffer, pinfo.triangleVertexIndexBuffer, triangle, v);
 
       float t = anisotropyMetric(v[0].position.xyz, v[1].position.xyz, v[2].position.xyz);
       return simpleShade(colorMap(frameInfo.colormap, t), NdotL);
@@ -369,7 +366,11 @@ vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshI
       return simpleShade(uintToColor(gl_PrimitiveID), NdotL);
 
     case eRenderShading_subdivLevel: {
-      vec3 color = subdDecFlagsToColor(triInfo.subdLevel, triInfo.primitiveFlags, baryCoord);
+      // Visualize subdiv level that a triangle would be subdivided to.
+      // draw_compressed_basic.frag.glsl has its own path when rendering
+      // microtriangles. Draw magenta if there is no data rather than default 0.
+      bool hasSubdivLevels = (pinfo.sourceAttribFlags & eMeshAttributeTriangleSubdivLevelsBit) != 0;
+      vec3 color = hasSubdivLevels ? subdDecFlagsToColor(triInfo.subdLevel, MAX_BASE_SUBDIV, triInfo.primitiveFlags, baryCoord) : vec3(1, 0, 1);
       return simpleShade(color, NdotL);
     }
 
@@ -405,14 +406,14 @@ vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshI
       if(pinfo.vertexDirectionsBuffer != 0)
       {
         vec3 d[3];
-        getDirectionVertex(pinfo.vertexDirectionsBuffer, pinfo.triangleVertexIndexBuffer, d);
+        getDirectionVertex(pinfo.vertexDirectionsBuffer, pinfo.triangleVertexIndexBuffer, triangle, d);
         r = (dot(d[0], d[1]) < 0 || dot(d[1], d[2]) < 0 || dot(d[2], d[0]) < 0) ? 1 : 0;
       }
       return simpleShade(colorMap(frameInfo.colormap, r), NdotL);
     }
     case eRenderShading_sharedPositions: {
       Vertex v[3];
-      getTriangleVertex(pinfo.vertexPositionNormalBuffer, pinfo.triangleVertexIndexBuffer, v);
+      getTriangleVertex(pinfo.vertexPositionNormalBuffer, pinfo.triangleVertexIndexBuffer, triangle, v);
       vec3 p;
       if(baryCoord.x > baryCoord.y && baryCoord.x > baryCoord.z)
         p = v[0].position;
@@ -464,7 +465,7 @@ vec4 rasterShade(in vec3 baryCoord, in GltfShadeMaterial gltfMat, in DeviceMeshI
       return vec4(toLinear(vec3(fract(hit.uv), 0.)), 1);
     case eDbgMethod_direction: {
       vec3 d[3] = vec3[3](vec3(0), vec3(0), vec3(0));
-      getDirectionVertex(pinfo.vertexDirectionsBuffer, pinfo.triangleVertexIndexBuffer, d);
+      getDirectionVertex(pinfo.vertexDirectionsBuffer, pinfo.triangleVertexIndexBuffer, triangle, d);
       vec3 result = mixBary(d[0], d[1], d[2], baryCoord);
       return vec4(toLinear(result * .5 + .5), 1);
     }

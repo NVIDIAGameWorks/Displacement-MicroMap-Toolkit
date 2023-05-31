@@ -14,9 +14,11 @@
 #define DH_SCN_DESC_H 1
 
 #ifdef __cplusplus
-using mat4 = nvmath::mat4f;
-using vec4 = nvmath::vec4f;
-using vec3 = nvmath::vec3f;
+using mat4  = nvmath::mat4f;
+using vec4  = nvmath::vec4f;
+using vec3  = nvmath::vec3f;
+using ivec3 = nvmath::vec3i;
+using ivec2 = nvmath::vec2i;
 #endif  // __cplusplus
 
 
@@ -26,20 +28,6 @@ struct InstanceInfo
   mat4 worldToObject;
   int  materialID;
 };
-
-//struct Vertex
-//{
-//  vec4 position;
-//  vec4 normal;
-//  vec4 tangent;
-//};
-
-//struct PrimMeshInfo
-//{
-//  uint64_t vertexAddress;
-//  uint64_t indexAddress;
-//  int      materialIndex;
-//};
 
 // Must be kept in sync with meshops::MeshAttributeFlags
 // clang-format off
@@ -68,6 +56,9 @@ struct DeviceMeshInfo
   uint64_t vertexDirectionBoundsBuffer;
   uint64_t vertexImportanceBuffer;
 
+  // WatertightIndices
+  uint64_t triangleWatertightIndicesBuffer;
+
   // meshops::MeshAttributeFlags indicating which attributes are real or
   // generated/default-initialized.
   uint64_t sourceAttribFlags;
@@ -93,12 +84,46 @@ struct DeviceBaryInfo
   uint64_t rasterMeshDataBindingBuffer;
 };
 
+#define WATERTIGHT_INDICES_INVALID_VERTEX -1
+
+// Per-triangle indices to position-unique vertices, facilitating rendering
+// heightmap displacement without cracks. This fixes cracks due to heightmap
+// value differences across UV seams, but not cracks caused by normals pointing
+// in different directions.
+struct WatertightIndices
+{
+  // When tessellating and displacing a mesh with a heightmap, the bilinearly
+  // interpolated values across a UV seam will necessarily be slightly
+  // different. To avoid cracks, we fetch displacements along these edges too
+  // and take the average. Values of -1 indicate the edge is shared and not to
+  // take an average.
+  // Edge ordering: {v0,v1}, {v1,v2}, {v2,v0}
+  //
+  ivec2 seamEdge[3];
+
+  // Stop the cpp compiler tightly packing the next member
+  ivec2 padding_;
+
+  // Similarly, we need to average the displacements at shared vertices, however
+  // there maybe a variable, and indeed unlimited number (e.g. tip of a cone).
+  // We instead pick one vertex and sample height at only its UV coordinate.
+  // Values of -1 indicate either the vertex is shared and not to use its UV, or
+  // this is the vertex that others will snap to.
+  ivec3 watertightCornerVertex;
+
+  // When computing edge decimation for heightmap LODs, we need to know the LOD
+  // of adjacent triangles.
+  ivec3 adjacentTriangles;
+};
+
 struct SceneDescription
 {
   uint64_t materialAddress;
   uint64_t instInfoAddress;
   uint64_t deviceMeshInfoAddress;
   uint64_t deviceBaryInfoAddress;
+  uint64_t splitPartsVerticesAddress;
+  uint64_t splitPartsIndicesAddress;
 };
 
 struct GltfShadeMaterial

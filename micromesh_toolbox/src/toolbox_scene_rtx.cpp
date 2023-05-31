@@ -194,34 +194,32 @@ void ToolboxSceneRtx::createTopLevelAS(const std::unique_ptr<micromesh_tool::Too
 {
   nvh::ScopedTimer _st("- Create TLAS");
 
-  meshops::ArrayView<micromesh_tool::ToolScene::PrimitiveInstance> prim_instances = scene->instances();
+  meshops::ArrayView<micromesh_tool::ToolScene::Instance> instances = scene->instances();
 
   std::vector<VkAccelerationStructureInstanceKHR> tlas;
-  tlas.reserve(prim_instances.size());
-  for(const auto& prim_inst : prim_instances)
+  tlas.reserve(instances.size());
+  for(const auto& instance : instances)
   {
     VkGeometryInstanceFlagsKHR flags{};
-
-    tinygltf::Material mat = {};
-    if(prim_inst.material >= 0 && static_cast<size_t>(prim_inst.material) < scene->model().materials.size())
-      mat = scene->model().materials[prim_inst.material];
+    int                        materialIndex = scene->meshes()[instance.mesh]->relations().material;
+    const tinygltf::Material&  material      = scene->material(materialIndex);
     // Always opaque, no need to use anyhit (faster)
-    if(mat.alphaMode == "OPAQUE"
-       || (mat.pbrMetallicRoughness.baseColorFactor[3] == 1.0F && mat.pbrMetallicRoughness.baseColorTexture.index == -1))
+    if(material.alphaMode == "OPAQUE"
+       || (material.pbrMetallicRoughness.baseColorFactor[3] == 1.0F && material.pbrMetallicRoughness.baseColorTexture.index == -1))
     {
       flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
     }
 
     // Need to skip the cull flag in traceray_rtx for double sided materials
-    if(mat.doubleSided == 1)
+    if(material.doubleSided == 1)
     {
       flags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
     }
 
     VkAccelerationStructureInstanceKHR ray_inst{};
-    ray_inst.transform           = nvvk::toTransformMatrixKHR(prim_inst.worldMatrix);  // Position of the instance
-    ray_inst.instanceCustomIndex = prim_inst.primMeshRef & 0x00FFFFFF;                 // gl_InstanceCustomIndexEXT
-    ray_inst.accelerationStructureReference         = m_rtBuilder.getBlasDeviceAddress(prim_inst.primMeshRef);
+    ray_inst.transform           = nvvk::toTransformMatrixKHR(instance.worldMatrix);  // Position of the instance
+    ray_inst.instanceCustomIndex = instance.mesh & 0x00FFFFFF;                        // gl_InstanceCustomIndexEXT
+    ray_inst.accelerationStructureReference         = m_rtBuilder.getBlasDeviceAddress(instance.mesh);
     ray_inst.instanceShaderBindingTableRecordOffset = 0;  // We will use the same hit group for all objects
     ray_inst.flags                                  = flags & 0xFF;
     ray_inst.mask                                   = 0xFF;
@@ -230,7 +228,5 @@ void ToolboxSceneRtx::createTopLevelAS(const std::unique_ptr<micromesh_tool::Too
 
   VkBuildAccelerationStructureFlagsKHR tlasFlags =
       VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-  if(useMicroMesh)
-    tlasFlags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISPLACEMENT_MICROMAP_INSTANCE_NV;
   m_rtBuilder.buildTlas(tlas, tlasFlags);
 }

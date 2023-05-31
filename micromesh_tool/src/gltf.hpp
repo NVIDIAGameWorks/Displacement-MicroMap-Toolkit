@@ -119,21 +119,16 @@ int makeAccessor(tinygltf::Model& model, meshops::ConstArrayView<T> data, int vi
 }
 
 /**
- * @brief Writes a MeshSetView to the gltf model, creating a new buffer that contains all attributes and positions.
+ * @brief Writes a MeshView to the gltf model, creating a new buffer that contains all attributes and positions.
  *
  * @param model Destination model to append the mesh data
- * @param meshSetView Input mesh data
+ * @param meshView Input mesh data
  * @param writeDisplacementMicromapExt Uses NV_displacement_micromap if true, else NV_micromap_tooling.
+ * @return Primitive structure with references to the added data. Not added to any of the model's meshes.
  */
-void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& meshSetView, bool writeDisplacementMicromapExt = false);
-
-inline void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshView& meshView, bool writeDisplacementMicromapExt = false)
-{
-  meshops::MeshSetView meshSetView;
-  meshSetView.flat = meshView;
-  meshSetView.slices.emplace_back(0, meshView.triangleCount(), 0, meshView.vertexCount());
-  appendToTinygltfModel(model, meshSetView, writeDisplacementMicromapExt);
-}
+tinygltf::Primitive tinygltfAppendPrimitive(tinygltf::Model&         model,
+                                            const meshops::MeshView& meshView,
+                                            bool                     writeDisplacementMicromapExt = false);
 
 // List of gltf extensions created by or possibly conflicting with appendToTinygltfModel.
 const std::set<std::string>& micromapExtensionNames();

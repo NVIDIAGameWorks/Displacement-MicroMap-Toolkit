@@ -42,107 +42,6 @@ MESHOPS_API void MESHOPS_CALL meshopsBakeOperatorDestroy(Context context, BakerO
   delete op;
 }
 
-static uint64_t estimateTrianglesTakingMemoryBytes(uint64_t memLimitBytes)
-{
-  // Assuming a linear increase from two samples:
-  // 8388608 triangles takes 889.88 MB
-  // 5013504 triangles takes 703.69 MB
-  // 3350528 triangles takes 358.94 MB
-  // 2682880 triangles takes 323.31 MB
-  // 1687552 triangles takes 372.12 MB
-  // 409600 triangles takes 116.12 MB
-  // TODO: incorrect - implies ~20k triangles at zero bytes
-
-  // Strange variance of +/- 50MB. Assume 60MB less to be conservative.
-  uint64_t margin = 60 * 1024 * 1024;
-  memLimitBytes   = memLimitBytes > margin ? memLimitBytes - margin : 0;
-
-  // Linear approximation
-  uint64_t triangles   = memLimitBytes / 100;
-  uint64_t constOffset = 1000000;
-  triangles            = triangles > constOffset ? triangles - constOffset : 0;
-
-  // 50MB device memory usage is about as low as it gets. Equivalent to ~200k triangles.
-  uint64_t minTriangles = 200000;
-  return std::max(minTriangles, triangles);
-}
-
-std::vector<GeometryBatch> computeBatches(uint64_t memLimitBytes, const meshops::MeshView& referenceMeshView)
-{
-  uint32_t meshNumBaseTriangles = static_cast<uint32_t>(referenceMeshView.triangleCount());
-
-  // If no limit is set, return a single batch for everything at once
-  if(memLimitBytes == 0)
-  {
-    GeometryBatch all{0, meshNumBaseTriangles, 0, 1};
-    return {all};
-  }
-
-  // Group meshes into chunks of this many triangles after tessllation
-  uint64_t maxTrianglesPerBatch = estimateTrianglesTakingMemoryBytes(memLimitBytes);
-
-  // Triangles in each high resolution mesh batch are expanded to include those adjacent to them to guarantee
-  // watertightness during baking. In cases of very high tessellation of small batches, this can result in far more
-  // triangles than intended per batch. The following function estimates the total number of triangles after including
-  // adjacent triangles and tessellating the result, given the current selection and predicted number after
-  // tessellation. It is likely an under-estimate, but better than nothing.
-  auto expandEdgeTrianglesEstimate = [](uint32_t baseTriangles, uint32_t tessellatedTriangles) {
-    double baseTrisF             = static_cast<double>(baseTriangles);
-    double tessellatedTrianglesF = static_cast<double>(tessellatedTriangles);
-    double tessellationFactor    = tessellatedTrianglesF / baseTrisF;
-
-    // Assume the triangle selection is a quad patch
-    const double trianglesPerCellEdge = sqrt(2.0);
-    double       quadCells            = sqrt(baseTrisF) / trianglesPerCellEdge;
-
-    // Add 2 cells to each dimension
-    double expandedBaseTriangles = (quadCells + 2.0) * (quadCells + 2.0) * 2.0;
-
-    // Assume the tessellation factor will be the same for the expanded triangles
-    return static_cast<uint32_t>(ceil(expandedBaseTriangles * tessellationFactor));
-  };
-
-  std::vector<GeometryBatch> batches;
-  GeometryBatch              currentBatch{};
-  uint32_t                   batchTessellatedTriangles = 0;
-  for(uint32_t j = 0; j < meshNumBaseTriangles; ++j)
-  {
-    uint32_t numTessellatedTris = referenceMeshView.triangleSubdivisionLevels.empty() ?
-                                      1U :
-                                      (1U << (referenceMeshView.triangleSubdivisionLevels[j] * 2));
-
-    // Emit the batch if it's not empty and adding the next triangle would push it over the tessellated triangle limit
-    // Include an estimate for when the adjacent base triangles are added to the batch
-    uint32_t expandedBatchTessellatedTriangles =
-        expandEdgeTrianglesEstimate(currentBatch.triangleCount + 1, batchTessellatedTriangles + numTessellatedTris);
-    if(currentBatch.triangleCount && expandedBatchTessellatedTriangles > maxTrianglesPerBatch)
-    {
-      batches.push_back(currentBatch);
-      uint32_t nextBatchStart   = currentBatch.triangleOffset + currentBatch.triangleCount;
-      currentBatch              = {nextBatchStart};
-      batchTessellatedTriangles = 0;
-    }
-
-    // Add the triangle to the batch
-    currentBatch.triangleCount++;
-    batchTessellatedTriangles += numTessellatedTris;
-  }
-
-  // Add any remaining triangles to a final batch
-  if(currentBatch.triangleCount)
-  {
-    batches.push_back(currentBatch);
-  }
-
-  // Store index and total for logging
-  for(size_t i = 0; i < batches.size(); ++i)
-  {
-    batches[i].batchIndex   = (uint32_t)i;
-    batches[i].totalBatches = (uint32_t)batches.size();
-  }
-  return batches;
-}
-
 void initBaryData(const meshops::MeshView& meshView, uint32_t defaultSubdivLevel, baryutils::BaryBasicData* baryBasic)
 {
   *baryBasic = {};
@@ -209,7 +108,7 @@ void initBaryData(const meshops::MeshView& meshView, uint32_t defaultSubdivLevel
 MESHOPS_API void MESHOPS_CALL meshopsBakeGetProperties(Context context, BakerOperator op, OpBake_properties& properties)
 {
   // Defined in host_device.h
-  properties.maxLevel                    = MAX_SUBDIV_LEVELS;
+  properties.maxLevel                    = BAKER_MAX_SUBDIV_LEVEL;
   properties.maxResamplerTextures        = MAX_RESAMPLE_TEXTURES;
   properties.maxHeightmapTessellateLevel = baryutils::BaryLevelsMap::MAX_LEVEL;
 }
@@ -296,17 +195,17 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   if(input.resamplerInput.size() != output.resamplerTextures.size())
   {
     MESHOPS_LOGE(context,
-                 "OpBake_input::resamplerInput size (%zu) must match OpBake_output::resamplerTextures size (%zu)\n",
+                 "OpBake_input::resamplerInput size (%zu) must match OpBake_output::resamplerTextures size (%zu)",
                  input.resamplerInput.size(), output.resamplerTextures.size());
     return micromesh::Result::eInvalidRange;
   }
 
   // Debugging
 #if 0
-  MESHOPS_LOGI(context, "OpBake_input::baseMeshView has %s|%s\n",
+  MESHOPS_LOGI(context, "OpBake_input::baseMeshView has %s|%s",
                 triangleAttribBitsString(input.baseMeshView.getTriangleAttributeFlags()).c_str(),
                 vertexAttribBitsString(input.baseMeshView.getVertexAttributeFlags()).c_str());
-  MESHOPS_LOGI(context, "OpBake_input::referenceMeshView has %s|%s\n",
+  MESHOPS_LOGI(context, "OpBake_input::referenceMeshView has %s|%s",
                 triangleAttribBitsString(input.referenceMeshView.getTriangleAttributeFlags()).c_str(),
                 vertexAttribBitsString(input.referenceMeshView.getVertexAttributeFlags()).c_str());
 #endif
@@ -320,7 +219,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
     // Validate the topology exists
     if(meshRequirements.referenceMeshTopology && !input.referenceMeshTopology)
     {
-      MESHOPS_LOGE(context, "OpBake_input::referenceMeshTopology is null, but required by OpBake_requirements\n");
+      MESHOPS_LOGE(context, "OpBake_input::referenceMeshTopology is null, but required by OpBake_requirements");
       return micromesh::Result::eInvalidValue;
     }
 
@@ -328,14 +227,14 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
     if(!input.baseMeshView.hasMeshAttributeFlags(meshRequirements.baseMeshAttribFlags))
     {
       auto missingAttributes = (~input.baseMeshView.getMeshAttributeFlags()) & meshRequirements.baseMeshAttribFlags;
-      MESHOPS_LOGE(context, "OpBake_input::baseMeshView is missing %s mesh attribs\n",
+      MESHOPS_LOGE(context, "OpBake_input::baseMeshView is missing %s mesh attribs",
                    meshAttribBitsString(missingAttributes).c_str());
       return micromesh::Result::eInvalidValue;
     }
     if(!input.referenceMeshView.hasMeshAttributeFlags(meshRequirements.referenceMeshAttribFlags))
     {
       auto missingAttributes = (~input.referenceMeshView.getMeshAttributeFlags()) & meshRequirements.referenceMeshAttribFlags;
-      MESHOPS_LOGE(context, "OpBake_input::referenceMeshView is missing %s mesh attribs\n",
+      MESHOPS_LOGE(context, "OpBake_input::referenceMeshView is missing %s mesh attribs",
                    meshAttribBitsString(missingAttributes).c_str());
       return micromesh::Result::eInvalidValue;
     }
@@ -348,19 +247,19 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
 
     if(input.settings.level > properties.maxLevel)
     {
-      MESHOPS_LOGE(context, "OpBake_input::settings.level of %u is above the maximum, %u\n", input.settings.level,
+      MESHOPS_LOGE(context, "OpBake_input::settings.level of %u is above the maximum, %u", input.settings.level,
                    properties.maxLevel);
       return micromesh::Result::eInvalidValue;
     }
     if(input.resamplerInput.size() > properties.maxResamplerTextures)
     {
-      MESHOPS_LOGE(context, "OpBake_input::resamplerInput size of %zu is above the maximum, %u\n",
+      MESHOPS_LOGE(context, "OpBake_input::resamplerInput size of %zu is above the maximum, %u",
                    input.resamplerInput.size(), properties.maxResamplerTextures);
       return micromesh::Result::eInvalidValue;
     }
     if(input.referenceMeshHeightmap.texture != nullptr && input.referenceMeshHeightmap.maxSubdivLevel > properties.maxHeightmapTessellateLevel)
     {
-      MESHOPS_LOGE(context, "OpBake_input::referenceMeshHeightmap.maxSubdivLevel of %u is above the maximum, %u\n",
+      MESHOPS_LOGE(context, "OpBake_input::referenceMeshHeightmap.maxSubdivLevel of %u is above the maximum, %u",
                    input.referenceMeshHeightmap.maxSubdivLevel, properties.maxHeightmapTessellateLevel);
       return micromesh::Result::eInvalidValue;
     }
@@ -370,7 +269,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
      && (input.referenceMeshHeightmap.texture->m_mipData.size() != 1
          || input.referenceMeshHeightmap.texture->m_config.baseFormat != micromesh::Format::eR32_sfloat))
   {
-    MESHOPS_LOGE(context, "OpBake_input::referenceMeshHeightmap must be eR32_sfloat and host-accessible\n");
+    MESHOPS_LOGE(context, "OpBake_input::referenceMeshHeightmap must be eR32_sfloat and host-accessible");
     return micromesh::Result::eInvalidValue;
   }
 
@@ -382,7 +281,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   // only error out when not fitting.
   if(!input.settings.uniDirectional && !input.settings.fitDirectionBounds && !input.baseMeshView.vertexDirectionBounds.empty())
   {
-    MESHOPS_LOGE(context, "OpBake_input::settings.uniDirectional must be true when mesh has direction bounds.\n");
+    MESHOPS_LOGE(context, "OpBake_input::settings.uniDirectional must be true when mesh has direction bounds.");
     return micromesh::Result::eInvalidValue;
   }
 
@@ -404,7 +303,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   {
     if(texture.textureCoord != 0)
     {
-      MESHOPS_LOGE(context, "Non-zero OpBake_input::ResamplerInput::texCoordIndex (%u) is not supported\n", texture.textureCoord);
+      MESHOPS_LOGE(context, "Non-zero OpBake_input::ResamplerInput::texCoordIndex (%u) is not supported", texture.textureCoord);
       return micromesh::Result::eInvalidValue;
     }
     bool generatedTextureType = texture.textureType == TextureType::eQuaternionMap || texture.textureType == TextureType::eOffsetMap
@@ -413,11 +312,11 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
     {
       if(generatedTextureType)
       {
-        MESHOPS_LOGW(context, "OpBake_input::ResamplerInput::texture should be null for non-resampled texture types\n");
+        MESHOPS_LOGW(context, "OpBake_input::ResamplerInput::texture should be null for non-resampled texture types");
       }
       if(texture.texture->m_vk.imageView == VK_NULL_HANDLE)
       {
-        MESHOPS_LOGE(context, "Baker currently only supports vulkan images\n");
+        MESHOPS_LOGE(context, "Baker currently only supports vulkan images");
         return micromesh::Result::eInvalidValue;
       }
       inputTextures.push_back(
@@ -427,7 +326,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
     {
       if(!generatedTextureType)
       {
-        MESHOPS_LOGE(context, "OpBake_input::ResamplerInput::texture must be null for generated texture types\n");
+        MESHOPS_LOGE(context, "OpBake_input::ResamplerInput::texture must be null for generated texture types");
         return micromesh::Result::eInvalidValue;
       }
       // Insert a null object so that input and output texture arrays remain 1:1.
@@ -440,14 +339,14 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   {
     if(texture->m_vk.imageView == VK_NULL_HANDLE)
     {
-      MESHOPS_LOGE(context, "Baker currently only supports vulkan images\n");
+      MESHOPS_LOGE(context, "Baker currently only supports vulkan images");
       return micromesh::Result::eInvalidValue;
     }
     outputTextures.push_back(VkDescriptorImageInfo{sampler.get(), texture->m_vk.imageView, texture->m_vk.imageLayout});
   }
 
   // TODO put BakerVK into BakerOperator_c and make it re-usable
-  BakerVK baker(context->m_micromeshContext, context->m_vk->m_ptrs, context->m_config.threadCount);
+  BakerVK baker(context->m_micromeshContext, context->m_vk->m_ptrs);
 
   // Allocate storage for the result. We compute displacements for every microvertex regardless of edge flags.
   initBaryData(input.baseMeshView, input.settings.level, output.uncompressedDisplacement);
@@ -457,23 +356,47 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   ArrayView triangleMinMaxs(reinterpret_cast<nvmath::vec2f*>(output.uncompressedDisplacement->triangleMinMaxs.data()),
                             output.uncompressedDisplacement->triangleMinMaxsInfo.elementCount / 2);
 
-  baker.createVkResources(input, input.baseMeshView, input.referenceMeshView, distances);
+  // Create GPU buffers for the base mesh and output
+  baker.create(input, distances);
 
-  auto batches            = computeBatches(input.settings.memLimitBytes, input.referenceMeshView);
+  // Compute remaining memory available for the baker reference mesh. Textures
+  // and data for the base mesh have already been allocated.
+  VkDeviceSize memoryBudget, memoryUsage;
+  getMemoryUsageVk(context->m_vk->m_ptrs.context->m_physicalDevice, &memoryBudget, &memoryUsage);
+  VkDeviceSize memoryAvailable = memoryBudget - memoryUsage;
+  memoryAvailable              = (memoryAvailable * 9) / 10;  // Hard limit on 90%
+
+  // The user defined limit can artificially set the memory to fit within.
+  // Hopefully this hasn't already been exceeded.
+  if(input.settings.memLimitBytes != 0)
+  {
+    memoryAvailable = input.settings.memLimitBytes > memoryUsage ? input.settings.memLimitBytes - memoryUsage : 0;
+  }
+
+  // Arbitrary low memory warning
+  if(memoryAvailable < 512 * 1024 * 1024)
+  {
+    MESHOPS_LOGW(context, "remaining memory for baking is %.2f MiB", static_cast<double>(memoryAvailable) / 1024.0 / 1024.0);
+  }
+
+  auto batches = computeBatches(context, memoryAvailable, input.referenceMeshTopology, input.referenceMeshView);
+  assert(batches.size() == 1 || input.referenceMeshHeightmap.texture);  // Batching is only supported when tessellating for heightmaps
+
+  // Bake
   bool firstPassResamples = !input.settings.fitDirectionBounds;
   for(const auto& batch : batches)
   {
     baker.bakeAndResample(input, batch, firstPassResamples, inputTextures, outputTextures, distanceTextures, output.resamplerTextures);
   }
 
-  // Fit direction bounds
+  // Fit direction bounds and re-bake
   if(input.settings.fitDirectionBounds)
   {
     // Compute min/max displacement and re-run the compute pass with updated direction vectors
     const int fitPasses = 1;
     for(int i = 0; i < fitPasses; ++i)
     {
-      MESHOPS_LOGI(context, "Bounds fitting pass %i/%i (simple min/max)\n", i + 1, fitPasses);
+      MESHOPS_LOGI(context, "Bounds fitting pass %i/%i (simple min/max)", i + 1, fitPasses);
       baker.fitDirectionBounds(input, distances);
 
       // Re-run all batches with the new direction bounds
@@ -491,7 +414,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
   {
     MESHOPS_LOGW(context,
                  "Displacement micromap was considered flat. Either there was a problem during baking or displacement "
-                 "could be removed from this mesh.\n");
+                 "could be removed from this mesh.");
   }
 
   // Displacement distance post-processing
@@ -532,7 +455,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
           micromesh::micromeshOpComputeTriangleMinMaxs(context->m_micromeshContext, &micromapFloat, &output);
       if(result != micromesh::Result::eSuccess)
       {
-        MESHOPS_LOGE(context, "micromesh::micromeshOpComputeTriangleMinMaxs() failed\n");
+        MESHOPS_LOGE(context, "micromesh::micromeshOpComputeTriangleMinMaxs() failed");
         return result;
       }
       globalMinMax.x = output.globalMin.value_float[0];
@@ -551,7 +474,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
       micromesh::Result result = micromeshOpFloatToQuantized(context->m_micromeshContext, &input, &micromapFloat);
       if(result != micromesh::Result::eSuccess)
       {
-        MESHOPS_LOGE(context, "micromesh::micromeshOpFloatToQuantized() failed\n");
+        MESHOPS_LOGE(context, "micromesh::micromeshOpFloatToQuantized() failed");
         return result;
       }
 
@@ -565,7 +488,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
         result                   = micromeshOpFloatToQuantized(context->m_micromeshContext, &input, &minMaxsAsMicromap);
         if(result != micromesh::Result::eSuccess)
         {
-          MESHOPS_LOGE(context, "micromesh::micromeshOpFloatToQuantized() failed\n");
+          MESHOPS_LOGE(context, "micromesh::micromeshOpFloatToQuantized() failed");
           return result;
         }
       }
@@ -584,7 +507,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
       micromesh::Result result = micromesh::micromeshOpSanitizeEdgeValues(context->m_micromeshContext, &input, &micromapFloat);
       if(result != micromesh::Result::eSuccess)
       {
-        MESHOPS_LOGE(context, "micromesh::micromeshOpSanitizeEdgeValues() failed\n");
+        MESHOPS_LOGE(context, "micromesh::micromeshOpSanitizeEdgeValues() failed");
         return result;
       }
     }

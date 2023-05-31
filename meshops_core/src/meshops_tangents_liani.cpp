@@ -979,7 +979,6 @@ void createLianiTangents(Context         context,
                facevaryingTx,     tangent,            bitangents.data(), adjacencyMap,    tangentInit.data() };
 
     constexpr int k_chunkSize = 1024 * 16; //< thread chunking size
-    constexpr int k_stealSize = 1024;      //< work steal increments.
     {
         TANGENTS_PROFILE_ZONE(kProfilerMask, "generateTangents_prepareFacevarying");
 
@@ -995,7 +994,7 @@ void createLianiTangents(Context         context,
             parallelInput.pfnGenericSingleWorkload = prepareFacevarying<k_weightMode_angle>;
             parallelInput.userData = &args;
             parallelInput.batchSize = 1;
-            micromesh::Result result = micromesh::micromeshOpDistributeWork(context->m_micromeshContext, &parallelInput, numThreads);
+            [[maybe_unused]] micromesh::Result result = micromesh::micromeshOpDistributeWork(context->m_micromeshContext, &parallelInput, numThreads);
             assert(result == micromesh::Result::eSuccess);
         }
         else
@@ -1019,8 +1018,7 @@ void createLianiTangents(Context         context,
             parallelInput.pfnGenericSingleWorkload = combine;
             parallelInput.userData = &args;
             parallelInput.batchSize = 1;
-            micromesh::Result result = micromesh::micromeshOpDistributeWork(context->m_micromeshContext, &parallelInput, numThreads);
-            assert(result == micromesh::Result::eSuccess);
+            [[maybe_unused]] micromesh::Result result = micromesh::micromeshOpDistributeWork(context->m_micromeshContext, &parallelInput, numThreads);
         }
         else
         {

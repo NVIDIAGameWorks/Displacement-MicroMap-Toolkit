@@ -24,9 +24,9 @@
 #include "host_device.h"
 
 // Buffers
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos
+layout(buffer_reference, scalar) readonly buffer BakerMeshInfos
 {
-  PrimMeshInfo i[];
+  BakerMeshInfo i[];
 };
 layout(buffer_reference, scalar) readonly buffer Vertices
 {
@@ -48,7 +48,7 @@ layout(set = 0, binding = eSceneDesc) readonly buffer SceneDesc_
 
 layout(push_constant) uniform PushContrive_
 {
-  PushHighLow pc;
+  BakerPushConstants pc;
 };
 
 layout(location = 0) out Interpolants
@@ -65,12 +65,12 @@ OUT;
 
 void main()
 {
-  PrimMeshInfos   pInfo_              = PrimMeshInfos(sceneDesc.primLoInfoAddress);
-  PrimMeshInfo    pinfo               = pInfo_.i[pc.primMeshID];
-  Indices         indices             = Indices(pinfo.indexAddress);
-  Vertices        vertices            = Vertices(pinfo.vertexAddress);
-  DirectionBounds directionBounds     = DirectionBounds(pinfo.vertexDirectionBoundsAddress);
-  DirectionBounds directionBoundsOrig = DirectionBounds(pinfo.vertexDirectionBoundsOrigAddress);
+  BakerMeshInfos  meshes              = BakerMeshInfos(sceneDesc.baseMeshAddress);
+  BakerMeshInfo   mesh                = meshes.i[0];
+  Indices         indices             = Indices(mesh.indexAddress);
+  Vertices        vertices            = Vertices(mesh.vertexAddress);
+  DirectionBounds directionBounds     = DirectionBounds(mesh.vertexDirectionBoundsAddress);
+  DirectionBounds directionBoundsOrig = DirectionBounds(mesh.vertexDirectionBoundsOrigAddress);
 
   uvec3  triIndices = indices.i[gl_VertexIndex / 3];
   uint   vertIndex  = triIndices[gl_VertexIndex % 3];

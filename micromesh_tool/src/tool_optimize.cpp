@@ -93,7 +93,6 @@ bool toolOptimizeParse(int argc, char** argv, ToolOptimizeArgs& args, std::ostre
 bool checkBaryRequirements(const bary::ContentView& contentView, micromesh::Format& outFormat, micromesh::FormatInfo& outFormatInfo)
 {
   const bary::BasicView& basic = contentView.basic;
-  const bary::MeshView&  mesh  = contentView.mesh;
 
   if(basic.valuesInfo == nullptr)
   {
@@ -342,7 +341,6 @@ bool passAnalyze(
 {
   const baryutils::BaryBasicData& baryBasicData = baryContent.basic;
   assert(baryBasicData.groups.size() == 1 && "ToolScene should have split .bary files into groups.");
-  const baryutils::BaryMeshData& baryMeshData = baryContent.mesh;
   const bary::Group&             baryGroup    = baryBasicData.groups[0];
 
   // Determine the subdiv level of each output triangle.
@@ -541,8 +539,7 @@ bool passTrimQuantize(
 {
   const baryutils::BaryBasicData& baryBasicData = baryContent.basic;
   assert(baryBasicData.groups.size() == 1 && "ToolScene should have split .bary files into groups.");
-  const baryutils::BaryMeshData& baryMeshData = baryContent.mesh;
-  const bary::Group&             baryGroup    = baryBasicData.groups[0];
+  const bary::Group& baryGroup = baryBasicData.groups[0];
 
   // Compute the input triangle offsets based on the subdivision level of
   // each triangle.
@@ -823,8 +820,8 @@ bool toolOptimize(ToolContext& context, const ToolOptimizeArgs& args, std::uniqu
   }
   else
   {
-    std::unique_ptr<ToolBary> outBary = std::make_unique<ToolBary>();
-    if(outBary->create(std::move(outBaryContents), "") != Result::eSuccess)
+    std::unique_ptr<ToolBary> outBary = ToolBary::create(std::move(outBaryContents));
+    if(!outBary)
     {
       return false;
     }

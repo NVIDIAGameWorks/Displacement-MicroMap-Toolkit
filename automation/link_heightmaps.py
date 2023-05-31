@@ -29,6 +29,7 @@ parser.add_argument('--extra-paths', nargs='+', type=pathlib.Path, help='Extra h
 parser.add_argument('--filter', nargs='+', help='Regex for material names to change')
 parser.add_argument('--filter-out', nargs='+', help='Regex for material names to ignore')
 parser.add_argument('--copy-from', type=pathlib.Path, help='Source gltf file to use as a template. Takes precedence over the image filename search.')
+parser.add_argument('--match-one-image', action='store_true', help='A heightmap will be matched to an image and only added to materials sharing that image. Reduces false positives.')
 #parser.add_argument('--heightmaps', nargs='+', type=pathlib.Path, help='Provide heightmap names explicitly in the order of materials')
 args = parser.parse_args()
 
@@ -36,15 +37,29 @@ args = parser.parse_args()
 def heightmapishName(name):
     return re.search(r'height|disp', name, re.IGNORECASE)
 
+def find_in_object(obj, target_name, depth):
+    if target_name in obj:
+        return obj[target_name]
+    if depth > 0:
+        for child in obj.values():
+            if isinstance(child, dict):
+                value = find_in_object(child, target_name, depth - 1)
+                if value is not None:
+                    return value
+    return None
+
 # Seach objects in the gltf json and return the ID for something referencing the given ID
 def find_ids(data, object_name, target_names, target_id):
     for id, obj in enumerate(data.get(object_name, [])):
         for target_name in target_names:
+            # Find target_name with depth 1 so baseColorTexture can be found in
+            # material.pbrMetallicRoughness instead of the material directly.
             #if args.verbose: print('Looking for {}=={} in {} {}'.format(target_name, target_id, object_name, id))
-            if target_name in obj:
-                if obj[target_name] == target_id:
+            value = find_in_object(obj, target_name, 1)
+            if value is not None:
+                if value == target_id:
                     yield id
-                elif isinstance(obj[target_name], dict) and obj[target_name].get('index') == target_id:
+                elif isinstance(value, dict) and value.get('index') == target_id:
                     yield id
 
 def heightmapMatchMetric(candidate, image, material_names):
@@ -149,8 +164,16 @@ for filepath in args.gltf:
     # Assume the most similar heightmap names belong to the same materials as existing images in a greedy fashion
     unlinked_heightmaps = []
     unlinked_material_ids = set()
+    best_image = {}
+    warn_multiple_matches = False
     for metric, candidate, image, material_ids in reversed(sorted(matches)):
         heightmap = candidate
+        if heightmap.name in best_image and best_image[heightmap.name] != image:
+            if args.match_one_image:
+                continue
+            elif not warn_multiple_matches:
+                warn_multiple_matches = True
+                print("Warning: adding the same heightmap multiple times consider enabling '--match-one-image'", file=sys.stderr)
         for material_id in set(material_ids) - unlinked_material_ids:
             unlinked_material_ids.add(material_id)
 
@@ -176,6 +199,7 @@ for filepath in args.gltf:
             # Add the material to the job list
             material_name = data['materials'][material_id]['name']
             unlinked_heightmaps += [(material_id, material_name, heightmap, image, sampler_id)]
+            best_image[heightmap.name] = image
 
     had_changes = False
 

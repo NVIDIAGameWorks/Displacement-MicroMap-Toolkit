@@ -10,6 +10,7 @@
 // its affiliates is strictly prohibited.
 //
 
+#include <cstddef>
 #include <meshops_internal/meshops_context.h>
 #include "meshops_tangents_lengyel.hpp"
 #include "meshops_tangents_liani.hpp"
@@ -65,6 +66,64 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpGenerateVertexDirections(Con
     }
   }
 
+  return micromesh::Result::eSuccess;
+}
+
+MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpApplyBounds(Context                    context,
+                                                                size_t                     count,
+                                                                const OpApplyBounds_input* inputs,
+                                                                OpApplyBounds_modified*    modifieds)
+{
+  for(size_t i = 0; i < count; ++i)
+  {
+    const OpApplyBounds_input& input    = inputs[i];
+    OpApplyBounds_modified&    modified = modifieds[i];
+    if(input.meshView.vertexDirectionBounds.empty())
+    {
+      MESHOPS_LOGE(context, "meshops::OpApplyBounds_input[%zu].meshView.vertexDirectionBounds is empty", i);
+      return micromesh::Result::eInvalidValue;
+    }
+    if(input.meshView.vertexCount() != modified.meshView->vertexCount())
+    {
+      MESHOPS_LOGE(context,
+                   "meshops::OpApplyBounds_input[%zu] vertex count does not match meshops::OpApplyBounds_modified[%zu]", i, i);
+      return micromesh::Result::eInvalidValue;
+    }
+    if(modified.meshView->vertexPositions.empty())
+    {
+      MESHOPS_LOGE(context, "meshops::OpApplyBounds_modified[%zu].meshView->vertexPositions is empty", i);
+      return micromesh::Result::eInvalidValue;
+    }
+    if(modified.meshView->vertexDirections.empty())
+    {
+      MESHOPS_LOGE(context, "meshops::OpApplyBounds_modified[%zu].meshView->vertexDirections is empty", i);
+      return micromesh::Result::eInvalidValue;
+    }
+  }
+  for(size_t i = 0; i < count; ++i)
+  {
+    const OpApplyBounds_input& input      = inputs[i];
+    OpApplyBounds_modified&    modified   = modifieds[i];
+    auto&                      bounds     = input.meshView.vertexDirectionBounds;
+    auto&                      positions  = modified.meshView->vertexPositions;
+    auto&                      directions = modified.meshView->vertexDirections;
+    nvh::parallel_ranges(
+        input.meshView.vertexCount(),
+        [&](uint64_t idxBegin, uint64_t idxEnd, uint32_t threadIdx) {
+          for(uint64_t i = idxBegin; i < idxEnd; i++)
+          {
+            // Add the bounds bias to the position
+            positions[i] += directions[i] * bounds[i].x;
+
+            // Multiply the direction vector by the bounds scale
+            directions[i] *= bounds[i].y;
+          }
+        },
+        micromesh::micromeshOpContextGetConfig(context->m_micromeshContext).threadCount);
+
+    // Clear any vertexDirectionBounds on the output
+    modified.meshView->resize(meshops::MeshAttributeFlagBits::eMeshAttributeVertexDirectionBoundsBit, 0, 0);
+  }
   return micromesh::Result::eSuccess;
 }
 
@@ -278,7 +337,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpGenerateVertexTangentSpace(C
     }
     else
     {
-      MESHOPS_LOGE(context, "inputs->[%zu].algorithm (%u) must be one of eLengyel, eLiani, or eMikkTSpace.\n", i,
+      MESHOPS_LOGE(context, "inputs->[%zu].algorithm (%u) must be one of eLengyel, eLiani, or eMikkTSpace.", i,
                    uint32_t(input.algorithm));
       result = micromesh::Result::eInvalidValue;
     }

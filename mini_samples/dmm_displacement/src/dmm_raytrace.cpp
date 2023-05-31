@@ -304,6 +304,8 @@ private:
 
   void createGbuffers(const vec2& size)
   {
+    vkDeviceWaitIdle(m_device);
+
     // Rendering image targets
     m_viewSize = size;
     m_gBuffer  = std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get(),
@@ -517,8 +519,7 @@ private:
 
     // #MICROMESH
     VkBuildAccelerationStructureFlagsKHR build_flags =
-        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR
-        | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISPLACEMENT_MICROMAP_INSTANCE_NV;
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 
     m_rtBuilder.buildTlas(tlas, build_flags);
   }
@@ -804,6 +805,8 @@ auto main(int argc, char** argv) -> int
 
 
   app->run();
+
+  vkDeviceWaitIdle(app->getContext()->m_device);
   app.reset();
 
   return test->errorCode();

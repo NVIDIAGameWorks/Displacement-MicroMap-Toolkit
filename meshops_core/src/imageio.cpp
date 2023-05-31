@@ -443,12 +443,11 @@ ImageIOData loadWithLibPNG(const void*  data,
     return result;
   }
 
-  size_t read_components{};
-  size_t read_bit_depth{};
+  size_t      read_components = PNG_IMAGE_SAMPLE_CHANNELS(image.format);
+  size_t      read_bit_depth  = PNG_IMAGE_SAMPLE_COMPONENT_SIZE(image.format) * 8;
+  png_uint_32 read_linear_bit = image.format & PNG_FORMAT_FLAG_LINEAR;
   if(required_components == 0)
   {
-    read_components = PNG_IMAGE_SAMPLE_CHANNELS(image.format);
-    read_bit_depth  = PNG_IMAGE_SAMPLE_COMPONENT_SIZE(image.format) * 8;
     // libpng's 2-component format is {gray, alpha}, which isn't quite what
     // we want in convertFormat. So force that to RGBA:
     if(read_components == 2)
@@ -460,17 +459,7 @@ ImageIOData loadWithLibPNG(const void*  data,
   }
   else if(required_components == 1)
   {
-    if(required_bit_depth > 8)
-    {
-      // Use PNG "2-byte format" when 16 or 32 bits are requested
-      image.format = PNG_FORMAT_LINEAR_Y;
-    }
-    else
-    {
-      // Note that we could use LINEAR_Y to perform gamma conversion here,
-      // but instead, we ignore the color space information of the file.
-      image.format = PNG_FORMAT_GRAY;
-    }
+    image.format = PNG_FORMAT_GRAY;
   }
   else if(required_components <= 3)
   {
@@ -480,6 +469,12 @@ ImageIOData loadWithLibPNG(const void*  data,
   {
     image.format = PNG_FORMAT_RGBA;
   }
+
+  // Restore the format's linear bit. The high level libpng API is really tied
+  // to 8-bit images being sRGB and 16-bit images being linear. This doesn't
+  // matter so much as long as it doesn't try to do a conversion internally
+  // while loading.
+  image.format = read_linear_bit | (image.format & (~PNG_FORMAT_FLAG_LINEAR));
 
   read_components = PNG_IMAGE_SAMPLE_CHANNELS(image.format);
   read_bit_depth  = PNG_IMAGE_SAMPLE_COMPONENT_SIZE(image.format) * 8;
@@ -644,7 +639,11 @@ bool writePNG(const char* filename, size_t width, size_t height, const void* dat
   }
   image.height = static_cast<uint32_t>(height);
 
-  if(vkFormat == VK_FORMAT_R8G8B8A8_UNORM)
+  if(vkFormat == VK_FORMAT_R8_UNORM)
+  {
+    image.format = PNG_FORMAT_GRAY;
+  }
+  else if(vkFormat == VK_FORMAT_R8G8B8A8_UNORM)
   {
     image.format = PNG_FORMAT_RGBA;
   }

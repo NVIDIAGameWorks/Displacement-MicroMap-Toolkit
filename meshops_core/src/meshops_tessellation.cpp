@@ -122,7 +122,7 @@ void* tessBeginTriangleUncompressed(uint32_t meshTriangleIndex, uint32_t microma
   micromesh::MicromapValueFloatExpansion outputExp;
 
   micromesh::FormatInfo inputFormatInfo;
-  micromesh::Result     result = micromesh::micromeshFormatGetInfo(inputQuantized.format, &inputFormatInfo);
+  [[maybe_unused]] micromesh::Result result = micromesh::micromeshFormatGetInfo(inputQuantized.format, &inputFormatInfo);
   assert(micromesh::Result::eSuccess == result);
   if(inputFormatInfo.isCompressedOrPacked)
   {
@@ -143,8 +143,6 @@ void* tessBeginTriangleCompressed(uint32_t meshTriangleIndex, uint32_t micromapT
 {
   TessPayload&          payload = *reinterpret_cast<TessPayload*>(userData);
   const bary::Group&    group   = payload.config.baryDisplacement->groups[payload.config.baryDisplacementGroupIndex];
-  const bary::Triangle& tri =
-      payload.config.baryDisplacement->triangles[group.triangleFirst + micromapTriangleIndex + payload.config.baryDisplacementMapOffset];
 
   // decode to uint11
   uint32_t  numValues;
@@ -160,8 +158,8 @@ void* tessBeginTriangleCompressed(uint32_t meshTriangleIndex, uint32_t micromapT
   inputExp.bias[0]  = group.floatBias.r;
   inputExp.scale[0] = group.floatScale.r;
   micromesh::MicromapValueFloatExpansion outputExp;
-  micromesh::Result result = micromesh::micromeshQuantizedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat,
-                                                                        &outputExp, payload.messageCallback);
+  [[maybe_unused]] micromesh::Result     result =
+      micromesh::micromeshQuantizedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat, &outputExp, payload.messageCallback);
   assert(result == micromesh::Result::eSuccess);
 
   return triFloats;
@@ -199,7 +197,6 @@ static TessVertex makeVertex(const micromesh::VertexGenerateInfo* vertexInfo, ui
 {
   TessPayload&             payload  = *reinterpret_cast<TessPayload*>(userData);
   const MeshView&          meshView = payload.inMeshView;
-  const ResizableMeshView& outMesh  = payload.outMeshView;
 
   nvmath::vec3f  baryCoord(vertexInfo->vertexWUVfloat.w, vertexInfo->vertexWUVfloat.u, vertexInfo->vertexWUVfloat.v);
   nvmath::vec3ui triVertices = meshView.triangleVertices[vertexInfo->meshTriangleIndex];
@@ -316,7 +313,6 @@ static uint32_t tessPerVertex(const micromesh::VertexGenerateInfo* vertexInfo,
                               void*                                userData)
 {
   TessPayload&             payload  = *reinterpret_cast<TessPayload*>(userData);
-  const MeshView&          meshView = payload.inMeshView;
   const ResizableMeshView& outMesh  = payload.outMeshView;
   TessVertex vertex = makeVertex<DISPLACED, BARY_DISPLACEMENT>(vertexInfo, threadIndex, beginTriangleResult, userData);
 
@@ -453,7 +449,7 @@ micromesh::Result tessellateMesh(Context context, const meshops::MeshView& meshV
       assert((attribFlags & MeshAttributeFlagBits::eMeshAttributeVertexDirectionBit) == 0);
       if(payload.inMeshView.vertexNormals.empty())
       {
-        MESHOPS_LOGE(context, "meshops::Heightmap::usesVertexNormalsAsDirections set but input mesh has no normals\n");
+        MESHOPS_LOGE(context, "meshops::Heightmap::usesVertexNormalsAsDirections set but input mesh has no normals");
         return micromesh::Result::eInvalidValue;
       }
       payload.inMeshView.vertexDirections = payload.inMeshView.vertexNormals;
@@ -469,7 +465,7 @@ micromesh::Result tessellateMesh(Context context, const meshops::MeshView& meshV
 
   if((config.baryDisplacement || config.heightmapTexture) && payload.inMeshView.vertexDirections.empty())
   {
-    MESHOPS_LOGE(context, "Cannot displace mesh without direction vectors\n");
+    MESHOPS_LOGE(context, "Cannot displace mesh without direction vectors");
     return micromesh::Result::eInvalidValue;
   }
 

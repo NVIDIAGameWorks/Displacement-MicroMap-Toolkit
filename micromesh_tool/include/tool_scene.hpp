@@ -45,31 +45,40 @@ namespace fs = std::filesystem;
 class ToolScene
 {
 public:
-  struct PrimitiveInstance
+  struct Instance
   {
-    nvmath::mat4f worldMatrix{};
-    int           primMeshRef{-1};  // reference to the array of primMesh
-    int           material{-1};     // unique primitive material
-    std::string   name;
+    nvmath::mat4f worldMatrix{};  // combined gltf transform (read-only)
+    int           mesh{-1};       // index into ToolScene::meshes(). Should never be -1.
+    int           gltfNode{-1};   // index to instantiating m_model->nodes[]. Should never be -1.
+    std::string   name;           // gltf node name (writable)
   };
 
-  micromesh::Result create(const fs::path& filename);
-  micromesh::Result create(std::unique_ptr<tinygltf::Model> model, const fs::path basePath);
-  micromesh::Result create(std::unique_ptr<tinygltf::Model>          model,
-                           std::vector<std::unique_ptr<ToolImage>>&& images,
-                           std::vector<std::unique_ptr<ToolBary>>&&  barys);
-  micromesh::Result create(const std::unique_ptr<ToolScene>& source);
-
-  void destroy();
+  [[nodiscard]] static std::unique_ptr<ToolScene> create(const fs::path& filename);
+  [[nodiscard]] static std::unique_ptr<ToolScene> create(std::unique_ptr<tinygltf::Model> model, const fs::path basePath);
+  [[nodiscard]] static std::unique_ptr<ToolScene> create(std::unique_ptr<tinygltf::Model>          model,
+                                                         std::vector<std::unique_ptr<ToolImage>>&& images,
+                                                         std::vector<std::unique_ptr<ToolBary>>&&  barys);
+  [[nodiscard]] static std::unique_ptr<ToolScene> create(const std::unique_ptr<ToolScene>& source);
 
   ToolScene() = default;
-  ~ToolScene()
-  {
-    assert(m_meshes.empty());  // call ToolBary::destroy()
-  }
+  ~ToolScene() {}
 
+  // Write the contents of the scene into a new tinygltf Model
   void write(tinygltf::Model& output, const std::set<std::string>& extensionFilter = {}, bool writeDisplacementMicromapExt = false);
 
+  // Rewrites the gltf meshes to match the scene's meshes().
+  void rewriteMeshes(tinygltf::Model& output, const std::set<std::string>& extensionFilter = {}, bool writeDisplacementMicromapExt = false);
+
+  // Rewrites the gltf micromesh extensions to match the scene's barys().
+  // Assumes the gltf meshes are already in sync.
+  void rewriteBarys(tinygltf::Model& output);
+
+  // Rewrites the gltf images to match the scene's images().
+  void rewriteImages(tinygltf::Model& output);
+
+  // Save the scene to a gltf file on disk along with all the images and bary
+  // files. Files are copied if the output path is a separate directory. Has
+  // optimizations for when the input data is unmodified.
   bool save(const fs::path& filename);
 
   // Mutable material properties, required by the resampler to generate new output textures.
@@ -78,6 +87,13 @@ public:
   const std::vector<tinygltf::Material>& materials() const { return m_model->materials; }
   std::vector<tinygltf::Texture>&        textures() { return m_model->textures; }
   std::vector<tinygltf::Texture>&        textures() const { return m_model->textures; }
+
+  // Shortcut to handle ToolMesh::Relations::material that may be -1, in which
+  // case a default material is used.
+  const tinygltf::Material& material(int materialIndex) const
+  {
+    return materialIndex == -1 ? m_defaultMaterial : materials()[materialIndex];
+  }
 
   // Returns true and sets heightmap information if it exists for the given material
   bool getHeightmap(int materialID, float& bias, float& scale, int& imageIndex) const;
@@ -99,12 +115,13 @@ public:
 
   // Creates a new un-allocated image. Returns the index to be used in
   // images()[index] and referencing the new image in the gltf textures() array.
-  // images()[index].create() should be called after this.
+  // This image must be populated with images()[index] = ToolImage::create().
+  // TODO: refactor BakerManager to append the image at the end
   uint32_t createImage();
 
-  // Creates a new image that is not part of the scene, but will be saved at the
+  // Inserts a new image that is not part of the scene, but will be saved at the
   // same time later on.
-  ToolImage& createAuxImage();
+  void appendAuxImage(std::unique_ptr<ToolImage> image);
 
   // Clears all m_barys and removes references from gltf primitives.
   void clearBarys();
@@ -113,8 +130,8 @@ public:
   const std::vector<std::unique_ptr<ToolMesh>>&  meshes() { return m_meshes; }
   const std::vector<std::unique_ptr<ToolBary>>&  barys() { return m_barys; }
   const std::vector<std::unique_ptr<ToolImage>>& images() { return m_images; }
-  meshops::ArrayView<PrimitiveInstance>          instances() { return m_primInstances; }  // Mutable but not resizable
-  const std::vector<PrimitiveInstance>&          getPrimitiveInstances() const { return m_primInstances; }
+  meshops::ArrayView<Instance>                   instances() { return m_instances; }  // Mutable but not resizable
+  const std::vector<Instance>&                   instances() const { return m_instances; }
 
   // Const getters. These casts are probably UB, but it's less buggy than trying
   // to sync two vectors and faster than populating a const vector for every
@@ -132,9 +149,6 @@ public:
     return reinterpret_cast<const std::vector<std::unique_ptr<const ToolImage>>&>(m_images);
   }
 
-  // Valid only if the scene exist, not empty and meshes exist
-  bool valid() const { return m_model && !m_model->scenes.empty() && !m_model->meshes.empty(); }
-
   // Getter for the input gltf model. This will contain stale or invalid mesh
   // data and invalid relations to it. It is used to store materials and other
   // non-mesh data. The model is required to save a new mesh with original
@@ -142,13 +156,33 @@ public:
   // providing a non-const ref.
   const tinygltf::Model& model() const { return *m_model; }
 
-  // Return true if all the data in the views came from the gltf file.
-  bool isOriginalData() const
+  // Return true if all mesh data came from the original gltf file, or has been
+  // in-place modified via the MutableMeshView.
+  bool isOriginalMeshData() const
   {
     for(auto& mesh : meshes())
       if(!mesh->isOriginalData())
         return false;
     return true;
+  }
+
+  // Return true if all image data came from their original files.
+  bool isOriginalImageData() const
+  {
+    for(auto& image : images())
+      if(!image->isOriginalData())
+        return false;
+    return true;
+  }
+
+  nvmath::mat4f firstInstanceTransform(size_t meshIndex) const
+  {
+    int instance = m_meshes[meshIndex]->relations().firstInstance;
+    if(instance == -1)
+    {
+      return nvmath::mat4f(1);
+    }
+    return m_instances[instance].worldMatrix;
   }
 
 private:
@@ -202,13 +236,17 @@ private:
   // resampler.
   std::vector<std::unique_ptr<ToolImage>> m_images;
 
-  // Flat list of all visible ToolMesh with their world matrix.
-  std::vector<PrimitiveInstance> m_primInstances;
+  // Flat list of all visible ToolMesh with their world matrix. Instance names
+  // are written back to the tinygltf nodes, but write() attempts to preserve
+  // the instance hierarchy in m_model->nodes. The transform is ignored.
+  std::vector<Instance> m_instances;
 
   // Textures generated by the resampler that are not part of the scene, but
   // need to be saved in the same location. E.g. quaternion and offset maps,
   // generated heightmaps and extra resampled textures.
   std::vector<std::unique_ptr<ToolImage>> m_auxImages;
+
+  tinygltf::Material m_defaultMaterial{};
 };
 
 struct ToolSceneDimensions
@@ -232,6 +270,7 @@ struct ToolSceneStats
   size_t      images{};
   bool        micromaps{};
   bool        heightmaps{};
+  bool        normalmaps{};
   bool        normalmapsMissingTangents{};
   uint32_t    maxBarySubdivLevel{};
 };

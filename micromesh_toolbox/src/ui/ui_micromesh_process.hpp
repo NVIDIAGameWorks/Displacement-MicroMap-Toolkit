@@ -12,6 +12,7 @@
 
 #pragma once
 #include "settings.hpp"
+#include <future>
 
 
 class ToolboxViewer;
@@ -23,7 +24,9 @@ class ToolboxScene;
 ///
 class UiMicromeshProcess
 {
-  ToolboxViewer* m_toolboxViewer;
+  ToolboxViewer*    m_toolboxViewer;
+  std::future<bool> m_toolOperation;
+  std::future<bool> m_loadingScene;
 
 public:
   UiMicromeshProcess(ToolboxViewer* v)
@@ -32,18 +35,20 @@ public:
   }
   bool onUI();
 
-
 private:
-  int loadSaveDelLine(std::string name, std::unique_ptr<ToolboxScene>& tboxscene, ViewerSettings::RenderViewSlot view, bool& dispbaked);
+  int  loadSaveDelLine(std::string name, std::unique_ptr<ToolboxScene>& tboxscene, ViewerSettings::RenderViewSlot view, bool& dispbaked);
   void runSourceToTarget();
   void attributesOperations(std::unique_ptr<ToolboxScene>& scene_base);
 };
+
 ///
 /// Implementation of the UI setting dialog section of for Raster rendering
 ///
 class UiMicromeshProcessPipeline
 {
-  ToolboxViewer* m_toolboxViewer;
+  ToolboxViewer*    m_toolboxViewer;
+  std::future<bool> m_toolOperation;
+  std::future<bool> m_loadingScene;
 
 public:
   UiMicromeshProcessPipeline(ToolboxViewer* v)
@@ -51,7 +56,6 @@ public:
   {
   }
   bool onUI();
-
 
 private:
   void loadLine(std::string name, ViewerSettings::RenderViewSlot view);

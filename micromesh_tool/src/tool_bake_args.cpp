@@ -144,16 +144,20 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
                      "are relative to the direction vectors with direction bounds, not normals! Best used with "
                      "--subdivmode uniform and --fit-direction-bounds false.");
   parser.addArgument({"--memLimitMb"}, &args.memLimitMb,
-                     "Attempt to keep memory usage below this threshold. Default is 4096. 0 to disable.");
+                     "Attempt to keep memory usage below this threshold. 0 to use available memory. default=0");
   parser.addArgument({"--tangents"}, &tangentAlgorithmName,
                      "Tangent generation algorithm. Options: \"liani\" (default; used in Omniverse), \"lengyel\" "
                      "(commonly used algorithm, as listed in Foundations of Game Engine Development, Volume 2), "
                      "\"mikktspace\" (mikktspace.com; used in Blender and glTF)");
   parser.addArgument({"--fit-direction-bounds"}, &args.fitDirectionBounds,
                      "Compute direction vector bounds for tighter BVH. default=true");
-  parser.addArgument({"--discard-direction-bounds"}, &args.discardDirectionBounds,
+  parser.addArgument({"--discard-direction-bounds"}, &args.discardInputBounds,
                      "Discards any input direction vector bounds. They will be re-created if --fit-direction-bounds is "
                      "enabled. default=true");
+  parser.addArgument({"--apply-direction-bounds"}, &args.applyDirectionBounds,
+                     "Apply direction bounds to the positions and direction vectors after baking. This saves some "
+                     "space but loses the ability to render the original geometry without micromaps applied. "
+                     "default=false, or true if resampling");
   parser.addArgument({"--heightmaps"}, &heightmaps,
                      "Height map filenames. One per mesh and separated with ';'. Empty names are supported. "
                      "default=glTF KHR_materials_displacement extension.");
@@ -201,6 +205,9 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
                      "match its heightmap resolution, if any. Use negative numbers to reduse the intermediate geometry "
                      "generated and improve baking performance. default=0");
   parser.addArgument({"--PNtriangles"}, &args.heightmapPNtriangles, "HEIGHTMAP: Use PN Triangles");
+  parser.addArgument({"--all"}, &args.all,
+                     "Bake all meshes, even if the reference has the same triangle count and no heightmap "
+                     "displacement. default=false");
 
   if(!parser.parse(argc, argv, os) || printHelp)
   {
@@ -262,11 +269,13 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
   args.texturesToResample = TexturesToResample::eNone;
   if(texturesToResample == "normals")
   {
-    args.texturesToResample = TexturesToResample::eNormals;
+    args.texturesToResample   = TexturesToResample::eNormals;
+    args.applyDirectionBounds = true;
   }
   else if(texturesToResample == "all")
   {
-    args.texturesToResample = TexturesToResample::eAll;
+    args.texturesToResample   = TexturesToResample::eAll;
+    args.applyDirectionBounds = true;
   }
 
   if(!tangentAlgorithmName.empty())

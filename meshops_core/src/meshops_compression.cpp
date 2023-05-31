@@ -51,19 +51,14 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpCompressDisplacementMicromap
     dataCompressed = baryutils::BaryBasicData();
 
     microutils::baryBasicDataCompressedInit(dataCompressed, bary::Format::eDispC1_r11_unorm_block);
+    bary::baryBasicViewGetMinMaxSubdivLevels(&basicUncompressed, &dataCompressed.minSubdivLevel, &dataCompressed.maxSubdivLevel);
     if(output.compressedDisplacementRasterMips)
     {
       microutils::baryMiscDataUncompressedMipInit(*output.compressedDisplacementRasterMips);
     }
 
-    bary::Group               baryGroupCompressed = {0};
-    bary::GroupHistogramRange baryGroupHistogram  = {0};
-
-    const bary::Group& baryGroupUncompressed = basicUncompressed.groups[groupIdx];
-
     micromesh::Micromap  inputMap;
     micromesh::ArrayInfo inputMinMaxs;
-
 
     micromesh::MicromapGeneric uncompressedMap;
     bary::Result baryResult = microutils::baryBasicViewToMicromap(basicUncompressed, groupIdx, uncompressedMap);

@@ -94,6 +94,17 @@ bool toolPreTessellate(micromesh_tool::ToolContext&                context,
     auto& mesh     = scene->meshes()[meshIndex];
     auto& meshView = mesh->view();
 
+    // Track new triangle counts. Assume the mesh will be skipped, update later.
+    size_t initialTriangleCount = meshView.triangleCount();
+    totalTriangles += initialTriangleCount;
+    totalNewTriangles += initialTriangleCount;
+
+    if(meshView.vertexTexcoords0.empty())
+    {
+      LOGW("Warning: did not pre-tessellate mesh %zu (no texture coordinates)\n", meshIndex);
+      continue;
+    }
+
     uint32_t heightmapWidth  = args.heightmapWidth;
     uint32_t heightmapHeight = args.heightmapHeight;
 
@@ -117,6 +128,12 @@ bool toolPreTessellate(micromesh_tool::ToolContext&                context,
       {
         LOGE("Failed to read heightmap info on scene\n");
       }
+    }
+
+    if(heightmapWidth == 0 || heightmapHeight == 0)
+    {
+      LOGW("Warning: did not pre-tessellate mesh %zu (missing heightmap resolution)\n", meshIndex);
+      continue;
     }
 
     meshops::MeshTopologyData meshTopology;
@@ -167,9 +184,8 @@ bool toolPreTessellate(micromesh_tool::ToolContext&                context,
     assert(tessellatedMesh->view().triangleSubdivisionLevels.empty());
     assert(tessellatedMesh->view().trianglePrimitiveFlags.empty());
 
-    // Update stats
-    totalTriangles += meshView.triangleCount();
-    totalNewTriangles += tessellatedMesh->view().triangleCount();
+    // Update stats. New triangles already includes initialTriangleCount.
+    totalNewTriangles += tessellatedMesh->view().triangleCount() - initialTriangleCount;
     LOGI("  Triangles: %zu -> %zu\n", meshView.triangleCount(), tessellatedMesh->view().triangleCount());
 
     // Replace the current mesh in the scene

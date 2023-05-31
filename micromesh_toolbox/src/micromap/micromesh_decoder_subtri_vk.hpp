@@ -16,17 +16,20 @@ namespace microdisp {
 
 class MicroSplitParts;
 
+void initSplitPartsSubTri(ResourcesVK& res, MicromeshSplitPartsVk& splitParts);
+
 class MicromeshSubTriangleDecoderVK
 {
 public:
-  MicromeshSubTriangleDecoderVK(MicromeshSetCompressedVK& microSet)
-      : m_micro(microSet)
+  MicromeshSubTriangleDecoderVK(const MicromeshSplitPartsVk& splitParts, MicromeshSetCompressedVK& microSet)
+      : m_parts(splitParts)
+      , m_micro(microSet)
   {
   }
 
   void init(ResourcesVK&             res,
             const bary::ContentView& bary,
-            uint8_t*                 decimateEdgeFlags,
+            const uint8_t*           decimateEdgeFlags,
             uint32_t                 maxSubdivLevel,
             bool                     useBaseTriangles,
             bool                     withAttributes,
@@ -35,25 +38,22 @@ public:
 private:
   friend class MicromeshMicroTriangleDecoderVK;
 
-  MicromeshSetCompressedVK& m_micro;
+  const MicromeshSplitPartsVk& m_parts;
+  MicromeshSetCompressedVK&    m_micro;
 
   void uploadMicroSubTriangles(nvvk::StagingMemoryManager* staging,
                                VkCommandBuffer             cmd,
                                const bary::ContentView&    bary,
-                               uint8_t*                    decimateEdgeFlags,
+                               const uint8_t*              decimateEdgeFlags,
                                uint32_t                    maxSubdivLevel,
                                uint32_t                    numThreads);
 
   void uploadMicroBaseTriangles(nvvk::StagingMemoryManager* staging,
                                 VkCommandBuffer             cmd,
                                 const bary::ContentView&    bary,
-                                uint8_t*                    decimateEdgeFlags,
+                                const uint8_t*              decimateEdgeFlags,
                                 uint32_t                    maxSubdivLevel,
                                 uint32_t                    numThreads);
-
-  void uploadDescends(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits);
-
-  void uploadVertices(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits);
 };
 
 }  // namespace microdisp

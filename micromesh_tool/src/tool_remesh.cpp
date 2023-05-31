@@ -34,8 +34,7 @@ namespace tool_remesh {
 
 bool toolRemeshParse(int argc, char** argv, ToolRemeshArgs& args, std::ostream& os)
 {
-  bool              printHelp       = false;
-  bool              edgeLengthBased = false;
+  bool              printHelp = false;
   CommandLineParser parser("remesh: decimates a triangle mesh, optimizing for micromap friendly geometry");
   parser.addArgument({"--help"}, &printHelp, "Print Help");
 
@@ -89,6 +88,8 @@ bool toolRemeshParse(int argc, char** argv, ToolRemeshArgs& args, std::ostream& 
   parser.addArgument({"--ignoretangents"}, &args.ignoreTangents, "Ignore the tangents discontinuities. default=false");
   parser.addArgument({"--ignoredisplacementdirections"}, &args.ignoreDisplacementDirections,
                      "Ignore the displacement directions discontinuities. default=false");
+  parser.addArgument({"--remeshmintriangles"}, &args.remeshMinTriangles,
+                     "Only remesh meshes with at least this many triangles. default=0");
 
   parser.addArgument({"--disablemicromeshdata"}, &args.disableMicromeshData,
                      "Disable the generation of micromesh-related metadata. default=false");
@@ -177,9 +178,6 @@ bool toolRemesh(micromesh_tool::ToolContext& context, const ToolRemeshArgs& args
     return false;
   }
 
-  size_t totalTriangles    = 0;
-  size_t totalNewTriangles = 0;
-
   micromesh_tool::GenerateImportanceOperator generateImportanceOperator(context.meshopsContext());
 
   micromesh_tool::RemeshingOperator remeshingOperator(context.meshopsContext());
@@ -199,15 +197,19 @@ bool toolRemesh(micromesh_tool::ToolContext& context, const ToolRemeshArgs& args
 
   for(size_t meshIndex = 0; meshIndex < scene->meshes().size(); ++meshIndex)
   {
-
     LOGI("Mesh %zu/%zu\n", meshIndex + 1, scene->meshes().size());
     auto& mesh     = scene->meshes()[meshIndex];
     auto& meshView = mesh->view();
 
+    // Filter out some meshes in the scene that may not be good to remesh
+    if(mesh->view().triangleCount() < args.remeshMinTriangles)
+    {
+      LOGI("Skipping due to --remeshmintriangles\n");
+      continue;
+    }
+
     // Allocate storage for output attributes, if missing
     const meshops::MeshAttributeFlags combinedMeshAttributes = (~meshView.getMeshAttributeFlags()) & requiredMeshAttributes;
-    bool hadDirections = ((meshView.getMeshAttributeFlags() & meshops::eMeshAttributeVertexDirectionBit)
-                          == meshops::eMeshAttributeVertexDirectionBit);
     meshView.resize(combinedMeshAttributes, meshView.triangleCount(), meshView.vertexCount());
     {
       nvh::ScopedTimer timer("Generating per-vertex directions - ");
@@ -332,8 +334,17 @@ bool toolRemesh(micromesh_tool::ToolContext& context, const ToolRemeshArgs& args
     }
     else
     {
-      LOGW("Invalid decimation ratio %f ( valid range ]0, 1[ ) - reverting to error threshold %f", args.decimationRatio,
-           args.errorThreshold);
+      if(args.decimationRatio == 0.0f)
+      {
+        LOGI("Remeshing until error threshold %f is reached as no decimation ratio is given\n", args.errorThreshold);
+      }
+      else
+      {
+        LOGW(
+            "Warning: Invalid decimation ratio %f ( valid range ]0, 1[ ). Using error threshold %f to limit decimation "
+            "instead\n",
+            args.decimationRatio, args.errorThreshold);
+      }
       input.maxOutputTriangleCount = ~0u;
     }
     input.maxSubdivLevel                = args.maxSubdivLevel;

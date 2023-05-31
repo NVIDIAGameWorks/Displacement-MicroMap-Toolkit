@@ -83,6 +83,7 @@ struct ToolBakeArgs
   float              adaptiveFactor          = 1.0f;
   bool               compressed              = true;
   bool               compressedRasterData    = false;
+  bool               all                     = false;
   float              minPSNR                 = 50.0f;
   float              maxDisplacement         = 5.f;
   bool               overrideDirectionLength = false;  // true: don't use direction vector length, but maxDisplacement
@@ -95,7 +96,8 @@ struct ToolBakeArgs
   meshops::TangentSpaceAlgorithm tangentAlgorithm     = meshops::TangentSpaceAlgorithm::eDefault;
   bool                           fitDirectionBounds   = true;
   bool                           heightmapPNtriangles = false;
-  bool                           discardDirectionBounds = false;
+  bool                           discardInputBounds   = false;
+  bool                           applyDirectionBounds = false;
 #if 0
   bool               separateBaryFiles       = false;
 #endif

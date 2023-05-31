@@ -64,11 +64,13 @@ void debugWriteDisplacedReferenceMesh(const meshops::MeshView&           meshVie
     return;
   }
 
-  meshops::MeshSetView meshSetView;
-  meshSetView.flat = meshView;
-  meshSetView.slices.emplace_back(meshView.triangleCount(), meshView.vertexCount());
+  // Add the mesh to a gltf model
   tinygltf::Model model;
-  appendToTinygltfModel(model, meshSetView);
+  {
+    tinygltf::Mesh mesh;
+    mesh.primitives.push_back(tinygltfAppendPrimitive(model, meshView));
+    model.meshes.push_back(std::move(mesh));
+  }
 
   // Single material
   int materialID = static_cast<int>(model.materials.size());
@@ -118,15 +120,13 @@ static micromesh::Result writeDirectionBoundsMeshes(const std::unique_ptr<ToolSc
   // TODO: a ToolScene::createView() that has meshes pointing to the old scene
   // would be more efficient, but there's not much point until ToolImage can be
   // shared
-  ToolScene insideScene;
-  insideScene.create(scene);
-  ToolScene outsideScene;
-  outsideScene.create(scene);
+  auto insideScene  = ToolScene::create(scene);
+  auto outsideScene = ToolScene::create(scene);
   for(size_t i = 0; i < scene->meshes().size(); ++i)
   {
     auto& mesh        = scene->meshes()[i];
-    auto& insideMesh  = insideScene.meshes()[i];
-    auto& outsideMesh = outsideScene.meshes()[i];
+    auto& insideMesh  = insideScene->meshes()[i];
+    auto& outsideMesh = outsideScene->meshes()[i];
 
     for(size_t i = 0; i < mesh->view().vertexPositions.size(); ++i)
     {
@@ -151,18 +151,18 @@ static micromesh::Result writeDirectionBoundsMeshes(const std::unique_ptr<ToolSc
                                0, 0);
   }
 
-  for(auto& mesh : insideScene.meshes())
+  for(auto& mesh : insideScene->meshes())
     mesh->meta().name += "BoundsLower";
-  for(auto& instance : insideScene.instances())
+  for(auto& instance : insideScene->instances())
     instance.name += "BoundsLower";
-  for(auto& mesh : outsideScene.meshes())
+  for(auto& mesh : outsideScene->meshes())
     mesh->meta().name += "BoundsUpper";
-  for(auto& instance : outsideScene.instances())
+  for(auto& instance : outsideScene->instances())
     instance.name += "BoundsUpper";
 
   // Write the lower bounds mesh, including displacement lines
   tinygltf::Model insideGltfModel;
-  insideScene.write(insideGltfModel);
+  insideScene->write(insideGltfModel);
   microutils::ScopedOpContextMsg context(std::thread::hardware_concurrency());
   for(size_t i = 0; i < scene->meshes().size(); ++i)
   {
@@ -197,7 +197,7 @@ static micromesh::Result writeDirectionBoundsMeshes(const std::unique_ptr<ToolSc
     }
 
     addTinygltfModelLinesMesh(insideGltfModel, indices, positions, mesh->meta().name + "Displacements",
-                              mesh->firstInstanceTransform());
+                              scene->firstInstanceTransform(i));
   }
   if(!saveTinygltfModel("lowres_inside_bounds.gltf", insideGltfModel))
   {
@@ -208,15 +208,13 @@ static micromesh::Result writeDirectionBoundsMeshes(const std::unique_ptr<ToolSc
   // Write the upper bounds mesh. Don't use save() to avoid writing textures and
   // the bary file.
   tinygltf::Model outsideGltfModel;
-  outsideScene.write(outsideGltfModel);
+  outsideScene->write(outsideGltfModel);
   if(!saveTinygltfModel("lowres_outside_bounds.gltf", outsideGltfModel))
   {
     LOGE("Error: failed to write intermediate mesh lowres_outside_bounds.gltf\n");
     return micromesh::Result::eFailure;
   }
 
-  insideScene.destroy();
-  outsideScene.destroy();
   return micromesh::Result::eSuccess;
 }
 
@@ -239,8 +237,8 @@ bool toolBake(micromesh_tool::ToolContext& context, const ToolBakeArgs& args, st
       return false;
     }
 
-    reference = std::make_unique<ToolScene>();
-    if(reference->create(std::move(referenceGltfModel), fs::path(args.highFilename).parent_path()) != micromesh::Result::eSuccess)
+    reference = micromesh_tool::ToolScene::create(std::move(referenceGltfModel), fs::path(args.highFilename).parent_path());
+    if(!reference)
     {
       return false;
     }
@@ -252,8 +250,8 @@ bool toolBake(micromesh_tool::ToolContext& context, const ToolBakeArgs& args, st
     // because we need to generate different subdiv levels for the reference
     // mesh. We should instead be able to create a temporary "View" of the base
     // scene's model but have our own aux data for the reference scene.
-    reference = std::make_unique<ToolScene>();
-    if(reference->create(base) != micromesh::Result::eSuccess)
+    reference = micromesh_tool::ToolScene::create(base);
+    if(!reference)
     {
       return false;
     }
@@ -270,7 +268,6 @@ bool toolBake(micromesh_tool::ToolContext& context, const ToolBakeArgs& args, st
   bakeRefArgs.highFilename.clear();
 
   bool result = toolBake(context, bakeRefArgs, *reference, base);
-  reference->destroy();
 
   return result;
 }
@@ -321,11 +318,10 @@ bool toolBake(micromesh_tool::ToolContext&                context,
   // Determine how much memory we can use to load images and to tessellate
   // hi-res geometry, out of the limit of info.memLimitMb.
   uint64_t memLimitBytes = static_cast<uint64_t>(args.memLimitMb) << 20;
-  uint64_t textureMemLimit, bakerMemLimit;
+  uint64_t textureMemLimit;
   if(memLimitBytes == 0)
   {
     textureMemLimit = 0;
-    bakerMemLimit   = 0;
   }
   else
   {
@@ -350,7 +346,6 @@ bool toolBake(micromesh_tool::ToolContext&                context,
       // TODO: The 25% here is ad-hoc; it wouldbe nice to test a variety of
       // fractions and find the one that gives the best performance.
       textureMemLimit = std::max(texturesMinimumBytes, std::min(texturesIdealBytes, memLimitBytes / 4));
-      bakerMemLimit   = memLimitBytes - textureMemLimit;
     }
   }
   bakerManager.setMemoryLimit(textureMemLimit);
@@ -395,8 +390,8 @@ bool toolBake(micromesh_tool::ToolContext&                context,
     // Look for the reference mesh's heightmap - either given as an argument or in the mesh's material
     if(meshIndex < args.heightmaps.size())
     {
-      heightmapOverride = std::make_unique<micromesh_tool::ToolImage>();
-      if(heightmapOverride->create(fs::current_path(), args.heightmaps[meshIndex]) != micromesh::Result::eSuccess)
+      heightmapOverride = micromesh_tool::ToolImage::create(fs::current_path(), args.heightmaps[meshIndex]);
+      if(!heightmapOverride)
       {
         LOGE("Error: Failed to create image for heightmap\n");
         return false;
@@ -438,6 +433,20 @@ bool toolBake(micromesh_tool::ToolContext&                context,
         return false;
       }
       heightmapDesc.texture = *meshopsTextures.back();
+    }
+
+    // Skip this mesh if there is no extra reference mesh detail to bake into a micromesh unless --all is given.
+    if(baseMesh->view().triangleCount() == referenceMesh->view().triangleCount() && !heightmapImage)
+    {
+      if(args.all)
+      {
+        LOGW("Warning: baking to self. Same triangle count as reference and no heightmap.\n");
+      }
+      else
+      {
+        LOGI("Skipping mesh with no detail to bake. Same triangle count as reference and no heightmap.\n");
+        continue;
+      }
     }
 
     // Load textures to resample and prepare output images
@@ -493,7 +502,7 @@ bool toolBake(micromesh_tool::ToolContext&                context,
     }
 
     // Remove direction bounds from the input if args.discardDirectionBounds
-    if(args.discardDirectionBounds && !baseMesh->view().vertexDirectionBounds.empty())
+    if(args.discardInputBounds && !baseMesh->view().vertexDirectionBounds.empty())
     {
       LOGW("Dicarding direction vector bounds on mesh %zu due to --discard-direction-bounds\n", meshIndex)
       baseMesh->view().resize(meshops::MeshAttributeFlagBits::eMeshAttributeVertexDirectionBoundsBit, 0, 0);
@@ -681,15 +690,15 @@ bool toolBake(micromesh_tool::ToolContext&                context,
     // If bounds exist after generation, make sure uniDirectional is set.
     if(!settings.uniDirectional && baseFileHasDirectionBounds)
     {
-      LOGW("Warning:Enabling --uniDirectional because mesh has direction bounds\n");
+      LOGW("Warning: Enabling --uniDirectional because mesh has direction bounds\n");
       settings.uniDirectional = true;
     }
 
     baryutils::BaryBasicData baryUncompressedTemp;
 
     // Mesh transforms
-    nvmath::mat4f baseMeshTransform      = baseMesh->firstInstanceTransform();
-    nvmath::mat4f referenceMeshTransform = referenceMesh->firstInstanceTransform();
+    nvmath::mat4f baseMeshTransform      = base->firstInstanceTransform(meshIndex);
+    nvmath::mat4f referenceMeshTransform = reference.firstInstanceTransform(meshIndex);
 
     // Bake and resample. Compute displacement distances for all base mesh microvertices-to-be.
     {
@@ -748,6 +757,24 @@ bool toolBake(micromesh_tool::ToolContext&                context,
       }
     }
 
+    if(args.applyDirectionBounds && !baseMesh->view().vertexDirectionBounds.empty())
+    {
+      meshops::OpApplyBounds_input input;
+      input.meshView = baseMesh->view();
+
+      meshops::OpApplyBounds_modified modified;
+      modified.meshView = &baseMesh->view();
+
+      micromesh::Result result = meshops::meshopsOpApplyBounds(context.meshopsContext(), 1, &input, &modified);
+      if(result != micromesh::Result::eSuccess)
+      {
+        LOGE("Error: Applying direction bounds to mesh %zu failed\n", meshIndex);
+        return false;
+      }
+
+      assert(baseMesh->view().vertexDirectionBounds.empty());
+    }
+
     // Subdiv levels on the base mesh can be deleted as they have been consumed
     // by the baker and should now be in BaryBasicData::triangles.
     baseMesh->view().resize(meshops::MeshAttributeFlagBits::eMeshAttributeTriangleSubdivLevelsBit, 0, 0);
@@ -756,20 +783,27 @@ bool toolBake(micromesh_tool::ToolContext&                context,
     bakerManager.finishTexturesForMesh(contextVK->queueGCT, meshInstructions);
   }
 
-  // Add the bary data, generating a relative path from the output directory
-  std::unique_ptr<ToolBary> bary = std::make_unique<ToolBary>();
-  if(bary->create(std::move(baryContents), args.baryFilename) != micromesh::Result::eSuccess)
+  if(!baryContents.empty())
   {
-    return false;
-  }
-  size_t baryIndex = base->replaceBarys(std::move(bary));
+    // Add the bary data, generating a relative path from the output directory
+    std::unique_ptr<ToolBary> bary = ToolBary::create(std::move(baryContents), args.baryFilename);
+    if(!bary)
+    {
+      return false;
+    }
+    size_t baryIndex = base->replaceBarys(std::move(bary));
 
-  // Link the meshes with the bary groups in the micromap file. This is in case
-  // we need to support skipping some meshes during baking.
-  for(size_t groupIndex = 0; groupIndex < baryGroupToMeshIndex.size(); ++groupIndex)
+    // Link the meshes with the bary groups in the micromap file. This is in case
+    // we need to support skipping some meshes during baking.
+    for(size_t groupIndex = 0; groupIndex < baryGroupToMeshIndex.size(); ++groupIndex)
+    {
+      size_t meshIndex = baryGroupToMeshIndex[groupIndex];
+      base->linkBary(baryIndex, groupIndex, meshIndex);
+    }
+  }
+  else
   {
-    size_t meshIndex = baryGroupToMeshIndex[groupIndex];
-    base->linkBary(baryIndex, groupIndex, meshIndex);
+    LOGW("Warning: All meshes were skipped. Scene will have no micromesh displacement.\n");
   }
 
   // Debug meshes

@@ -10,15 +10,13 @@
  * its affiliates is strictly prohibited.
  */
 
-#ifndef IMGUI_DEFINE_MATH_OPERATORS
-#define IMGUI_DEFINE_MATH_OPERATORS
-#endif
-
+#pragma once
 
 #include "nvvk/profiler_vk.hpp"
 #include "nvvkhl/application.hpp"
 #include "tool_context.hpp"
 #include "toolbox_scene.hpp"
+#include <future>
 
 
 class UiRendering;
@@ -80,6 +78,7 @@ public:
   void onRender(VkCommandBuffer cmd) override;
 
   ViewerSettings& settings() { return m_settings; }
+  void            waitForLoad();
 
 private:
   friend UiRendering;
@@ -89,33 +88,33 @@ private:
   friend UiMicromeshProcess;
   friend UiMicromeshProcessPipeline;
 
-  void  createScene(const std::string& filename, SceneVersion sceneVersion);
-  void  createGbuffers(const nvmath::vec2f& size);
-  void  createVulkanBuffers();
-  bool  updateFrame();
-  void  resetFrame();
-  void  windowTitle();
-  void  screenPicking();
-  void  rtxPicking(const ImVec2& mousePosNorm);
-  void  raytraceScene(VkCommandBuffer cmd);
-  void  recordRasterScene(VkCommandBuffer& scnCmd);
-  void  renderNodes(VkCommandBuffer              cmd,
-                    const std::vector<uint32_t>& nodeIDs,
-                    ToolboxScene*                toolbox_scene,
-                    int                          numIndexed  = 1,
-                    int                          numDraw     = 0,
-                    bool                         useMeshTask = false);
-  void  renderRasterScene(VkCommandBuffer cmd);
-  void  rasterScene(VkCommandBuffer cmd);
-  void  createHdr(const std::string& filename);
-  void  destroyResources();
-  void  addSettingsHandler();
-  void  rasterPicking(const ImVec2& mousePosNorm);
-  void  updateDirty();
-  void  updateHbao();
-  bool  keyShortcuts();
-  void  updateFrameInfo(VkCommandBuffer cmd);
-  float getDepth(int x, int y);
+  [[nodiscard]] bool createScene(const std::string& filename, SceneVersion sceneVersion);
+  void               createGbuffers(const nvmath::vec2f& size);
+  void               createVulkanBuffers();
+  bool               updateFrame();
+  void               resetFrame();
+  void               windowTitle();
+  void               screenPicking();
+  void               rtxPicking(const ImVec2& mousePosNorm);
+  void               raytraceScene(VkCommandBuffer cmd);
+  void               recordRasterScene(VkCommandBuffer& scnCmd);
+  void               renderNodes(VkCommandBuffer              cmd,
+                                 const std::vector<uint32_t>& nodeIDs,
+                                 ToolboxScene*                toolbox_scene,
+                                 int                          numIndexed  = 1,
+                                 int                          numDraw     = 0,
+                                 bool                         useMeshTask = false);
+  void               renderRasterScene(VkCommandBuffer cmd);
+  void               rasterScene(VkCommandBuffer cmd);
+  [[nodiscard]] bool createHdr(const std::string& filename);
+  void               destroyResources();
+  void               addSettingsHandler();
+  void               rasterPicking(const ImVec2& mousePosNorm);
+  void               updateDirty();
+  void               updateHbao();
+  bool               keyShortcuts();
+  void               updateFrameInfo(VkCommandBuffer cmd);
+  float              getDepth(int x, int y);
 
   void setAllDirty(SceneDirtyFlags flag, bool v = true)
   {
@@ -143,6 +142,10 @@ private:
   nvvk::Buffer         m_bFrameInfo;
   nvvk::Buffer         m_pixelBuffer;
   nvvk::Context::Queue m_qGCT1{};
+
+  // Async loading
+  std::future<bool> m_loadingScene;
+  std::future<bool> m_loadingHdr;
 
   // Pipeline
   PushConstant m_pushConst{};  // Information sent to the shader

@@ -44,39 +44,41 @@
 
 namespace micromesh_tool {
 
-// Unique couple of node/mesh/primitive and material
-struct PrimitiveNode
+// Recursive call to build instance world matrices from the gltf node hierarchy
+static void createInstances(const tinygltf::Model&            model,
+                            std::vector<std::vector<int>>     gltfMeshToToolMeshes,
+                            int                               nodeID,
+                            nvmath::mat4f                     parentMatrix,
+                            std::vector<ToolScene::Instance>& instances)
 {
-  nvmath::mat4f              matrix;
-  const tinygltf::Node&      node;
-  const tinygltf::Mesh&      mesh;
-  const tinygltf::Primitive& primitive;
-  int                        nodeIndex;
-};
-
-//--------------------------------------------------------------------------------------------------
-// Collecting a linear list of all primitives, navigating down the scene tree list
-//
-static void collectPrimitiveNodes(int nodeID, nvmath::mat4f parentMatrix, std::vector<PrimitiveNode>& primNodes, const tinygltf::Model* model)
-{
-  const tinygltf::Node& node   = model->nodes[nodeID];
+  const tinygltf::Node& node   = model.nodes[nodeID];
   nvmath::mat4f         matrix = parentMatrix * nvh::getLocalMatrix(node);
 
-  // Check if the node have a valid mesh, sometimes nodes only have a matrix and children
+  // Create an instances if the node has a valid mesh - typically leaf nodes.
   if(node.mesh >= 0)
   {
-    const tinygltf::Mesh& mesh = model->meshes[node.mesh];
-    for(const tinygltf::Primitive& primitive : mesh.primitives)
+    // Each gltf Mesh can have multiple Primitives, which map to a single
+    // ToolMesh. That means multiple ToolScene instances may be needed to
+    // instantiate a gltf Mesh.
+    auto& gltfPrimitives  = model.meshes[node.mesh].primitives;
+    auto& toolMeshIndices = gltfMeshToToolMeshes[node.mesh];
+    assert(gltfPrimitives.size() == toolMeshIndices.size());
+    for(size_t i = 0; i < gltfPrimitives.size(); ++i)
     {
-      PrimitiveNode primNode{matrix, node, mesh, primitive, nodeID};
-      primNodes.push_back(primNode);
+      ToolScene::Instance instance;
+      instance.worldMatrix = matrix;
+      instance.mesh        = toolMeshIndices[i];
+      instance.name        = node.name;
+      instance.gltfNode    = nodeID;
+      instances.push_back(instance);
     }
   }
 
-  // Recursion for all children of the node
+  // Create instances for all children of this node, accumulating the
+  // transformation matrix.
   for(int child : node.children)
   {
-    collectPrimitiveNodes(child, matrix, primNodes, model);
+    createInstances(model, gltfMeshToToolMeshes, child, matrix, instances);
   }
 }
 
@@ -101,58 +103,53 @@ static std::string makePrimitiveKey(const tinygltf::Primitive& primitive)
   return o.str();
 }
 
-micromesh::Result ToolScene::create(const fs::path& filename)
+std::unique_ptr<ToolScene> ToolScene::create(const fs::path& filename)
 {
-  assert(this);
   auto model = std::make_unique<tinygltf::Model>();
   if(!micromesh_tool::loadTinygltfModel(filename, *model))
   {
     LOGE("Error: Failed to load '%s'\n", filename.string().c_str());
-    return micromesh::Result::eFailure;
+    return {};
   }
 
   if(!updateNVBarycentricDisplacementToNVDisplacementMicromap(*model))
   {
-    return micromesh::Result::eFailure;
+    return {};
   }
 
   // Wrap it with ToolScene to provide abstract mesh views and aux data storage
   auto basePath = fs::path(filename).parent_path();
 
-  return create(std::move(model), basePath);
+  return ToolScene::create(std::move(model), basePath);
 }
 
-micromesh::Result ToolScene::create(std::unique_ptr<tinygltf::Model> model, const fs::path basePath)
+std::unique_ptr<ToolScene> ToolScene::create(std::unique_ptr<tinygltf::Model> model, const fs::path basePath)
 {
-  assert(this);
-  assert(m_meshes.empty());  // call ToolBary::destroy()
-  *this = ToolScene(std::move(model), basePath);
-  if(meshes().size() == 0)
+  auto result = std::unique_ptr<ToolScene>(new ToolScene(std::move(model), basePath));
+  if(result->meshes().size() == 0)
   {
     LOGE("Error: Creating a scene with no meshes\n");
-    return micromesh::Result::eFailure;
+    result.reset();
   }
-  return micromesh::Result::eSuccess;
+  return result;
 }
 
-micromesh::Result ToolScene::create(std::unique_ptr<tinygltf::Model>          model,
-                                    std::vector<std::unique_ptr<ToolImage>>&& images,
-                                    std::vector<std::unique_ptr<ToolBary>>&&  barys)
+std::unique_ptr<ToolScene> ToolScene::create(std::unique_ptr<tinygltf::Model>          model,
+                                             std::vector<std::unique_ptr<ToolImage>>&& images,
+                                             std::vector<std::unique_ptr<ToolBary>>&&  barys)
 {
-  assert(this);
-  *this = ToolScene(std::move(model), std::move(images), std::move(barys));
-  if(meshes().size() == 0)
+  auto result = std::unique_ptr<ToolScene>(new ToolScene(std::move(model), std::move(images), std::move(barys)));
+  if(result->meshes().size() == 0)
   {
     LOGE("Error: Creating a scene with no meshes\n");
-    return micromesh::Result::eFailure;
+    result.reset();
   }
-  return micromesh::Result::eSuccess;
+  return result;
 }
 
-micromesh::Result ToolScene::create(const std::unique_ptr<ToolScene>& source)
+std::unique_ptr<ToolScene> ToolScene::create(const std::unique_ptr<ToolScene>& source)
 {
-  assert(this);
-  assert(m_meshes.empty());  // call ToolBary::destroy()
+  auto result = std::make_unique<ToolScene>();
 
   // Copy all the data that ToolScene cannot represent. Do not copy buffers (or
   // buffer views or accessors) since the mesh data is likely stale. ToolMesh
@@ -161,7 +158,8 @@ micromesh::Result ToolScene::create(const std::unique_ptr<ToolScene>& source)
   // TODO: This is probably not safe to do blindly as there are possibly many
   // gltf features relying on data in discarded buffers. We should instead only
   // keep data we know we can write out safely.
-  auto model                = std::make_unique<tinygltf::Model>();
+  auto& model               = result->m_model;
+  model                     = std::make_unique<tinygltf::Model>();
   model->animations         = source->model().animations;
   model->materials          = source->model().materials;
   model->meshes             = source->model().meshes;  // Keep primitive extensions to preserve micromap references
@@ -180,72 +178,49 @@ micromesh::Result ToolScene::create(const std::unique_ptr<ToolScene>& source)
   model->extras             = source->model().extras;
 
   // Copy all ToolMesh objects
-  std::vector<std::unique_ptr<ToolMesh>> meshes;
   for(auto& mesh : source->meshes())
   {
     // Copy the mesh from the other scene, which may reference mixed tinygltf
     // data and new data, into the aux MeshData container of a new ToolMesh
-    meshes.push_back(std::make_unique<ToolMesh>(*mesh));
+    result->m_meshes.push_back(std::make_unique<ToolMesh>(*mesh));
   }
 
   // Copy all Micromap objects
-  std::vector<std::unique_ptr<ToolBary>> barys;
   for(auto& bary : source->m_barys)
   {
-    barys.push_back(std::make_unique<ToolBary>());
-    if(barys.back()->create(*bary) != micromesh::Result::eSuccess)
+    auto copy = ToolBary::create(*bary);
+    if(!copy)
     {
       LOGE("Error: failed to duplicate a ToolBary\n")
-      return micromesh::Result::eFailure;
+      return {};
     }
+    result->m_barys.push_back(std::move(copy));
   }
 
   // Copy all image objects
-  std::vector<std::unique_ptr<ToolImage>> images;
   for(auto& image : source->m_images)
   {
-    images.push_back(std::make_unique<ToolImage>());
-    if(images.back()->create(*image) != micromesh::Result::eSuccess)
+    auto copy = ToolImage::create(*image);
+    if(!copy)
     {
       LOGE("Error: failed to duplicate ToolImage %s. Ignoring.\n", image->relativePath().string().c_str())
     }
+    result->m_images.push_back(std::move(copy));
   }
 
   // Copy all auxiliary image objects
-  std::vector<std::unique_ptr<ToolImage>> auxImages;
   for(auto& image : source->m_auxImages)
   {
-    auxImages.push_back(std::make_unique<ToolImage>());
-    if(auxImages.back()->create(*image) != micromesh::Result::eSuccess)
+    auto copy = ToolImage::create(*image);
+    if(!copy)
     {
       LOGE("Error: failed to duplicate auxiliary ToolImage %s. Ignoring.\n", image->relativePath().string().c_str())
     }
+    result->m_auxImages.push_back(std::move(copy));
   }
 
-  // Clear and update the current object. This is done last in case there is an
-  // error and the ToolScene can be left in a consistent state.
-  *this           = {};
-  m_model         = std::move(model);
-  m_meshes        = std::move(meshes);
-  m_barys         = std::move(barys);
-  m_images        = std::move(images);
-  m_auxImages     = std::move(auxImages);
-  m_primInstances = source->m_primInstances;
-  return micromesh::Result::eSuccess;
-}
-
-void ToolScene::destroy()
-{
-  // Necessary only to catch failures to call ToolBary::destroy()
-  for(auto& bary : m_barys)
-  {
-    bary->destroy();
-  }
-  m_barys.clear();
-  m_primInstances.clear();
-  // Signal that the scene has been "destroyed"
-  m_meshes.clear();
-  m_model.reset();
+  result->m_instances = source->m_instances;
+  return result;
 }
 
 bool loadTinygltfModel(const fs::path& filename, tinygltf::Model& model)
@@ -338,41 +313,44 @@ bool saveTinygltfModel(const fs::path& filename, tinygltf::Model& model)
 
 void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& extensionFilter, bool writeDisplacementMicromapExt)
 {
-  // Attempt to match the structure of gltf meshes and mesh.primitives in the
-  // original gltf m_model when writing m_meshes. Rather than tracking indices
-  // and mesh instances (gltf Nodes), this block re-creates the mapping from
-  // gltf Nodes to ToolMesh instances that is done in ToolScene::createViews().
-  std::vector<PrimitiveNode> primNodes;
-  std::vector<PrimitiveNode> uniquePrimNodes;
-  std::vector<int>           nodeToMeshIndices(m_model->nodes.size(), -1);
-  std::vector<int>           nodeToInstanceIndices(m_model->nodes.size(), -1);
+  // Copy non-mesh data. This clobbers anything previously on the output model
+  // except mesh data.
+  copyTinygltfModelExtra(model(), output, extensionFilter);
+
+  // Fill and rewrite data from ToolScene
+  rewriteMeshes(output, extensionFilter, writeDisplacementMicromapExt);
+  rewriteBarys(output);
+  rewriteImages(output);
+}
+
+void ToolScene::rewriteMeshes(tinygltf::Model& output, const std::set<std::string>& extensionFilter, bool writeDisplacementMicromapExt)
+{
+  // Rebuild gltfMeshToToolMeshes from createViews(), so that we can write
+  // m_meshes in the same structure that they were originally created from. This
+  // complexity exists because a gltf mesh has multiple primitives, which can
+  // also share data. An alternative would be to store this mapping.
+  std::vector<std::vector<int>> gltfMeshToToolMeshes;
   {
-    // Get the list of nodes, meshes and primitives that made the ToolMesh
-    for(int nodeID : m_model->scenes[0].nodes)
+    int                                       nextMeshIndex = 0;
+    std::unordered_map<std::string, uint32_t> uniqueMeshPrim;
+    for(auto& mesh : m_model->meshes)
     {
-      collectPrimitiveNodes(nodeID, nvmath::mat4f(1), primNodes, m_model.get());
-    }
-
-    // Loop over those primitive nodes and add a tinygltf::Node only if the PrimitiveNode
-    // is unique, exactly the same way the ToolMesh array was created
-    std::unordered_map<std::string, uint32_t> processedPrim;
-    for(uint32_t i = 0; i < primNodes.size(); i++)
-    {
-      // A key is made to consolidate multiple mesh primitives that reference identical data.
-      std::string key = makePrimitiveKey(primNodes[i].primitive);
-
-      // Keep only the unique primitive/mesh nodes.
-      auto it = processedPrim.find(key);
-      if(it == processedPrim.end())
+      gltfMeshToToolMeshes.emplace_back();
+      for(auto& primitive : mesh.primitives)
       {
-        // Expected ToolMesh index
-        int meshIndex = static_cast<int>(uniquePrimNodes.size());
-        it            = processedPrim.insert({key, meshIndex}).first;
-        uniquePrimNodes.push_back(primNodes[i]);
-      }
+        // A key is made to consolidate multiple gltf mesh primitives that
+        // reference identical data.
+        std::string key = makePrimitiveKey(primitive);
 
-      nodeToMeshIndices[primNodes[i].nodeIndex] = it->second;
-      nodeToInstanceIndices[primNodes[i].nodeIndex] = i;
+        // Check if the mesh primitive has been added yet
+        auto it = uniqueMeshPrim.find(key);
+        if(it == uniqueMeshPrim.end())
+        {
+          // Keep info of the primitive reference for mesh instance
+          it = uniqueMeshPrim.insert({key, nextMeshIndex++}).first;
+        }
+        gltfMeshToToolMeshes.back().push_back(it->second);
+      }
     }
   }
 
@@ -387,13 +365,15 @@ void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& exte
     }
   };
 
-  // Write all meshes to the output model
-  assert(output.meshes.empty());  // output must be a new object
-  for(size_t meshID = 0; meshID < m_meshes.size(); meshID++)
+  // Write all meshes to the output model. This is done in two stages. First,
+  // each ToolMesh is added to buffers, returning a gltf Primitive for each.
+  assert(output.meshes.empty());     // output must be a new object
+  assert(!m_model->meshes.empty());  // mesh structure is duplicated from the original gltf
+  std::vector<tinygltf::Primitive> primitives;
+  primitives.reserve(m_meshes.size());
+  for(auto& mesh : m_meshes)
   {
-    const auto& mesh = m_meshes[meshID];
-
-    appendToTinygltfModel(output, static_cast<const meshops::MeshView>(mesh->view()), writeDisplacementMicromapExt);
+    tinygltf::Primitive primitive = tinygltfAppendPrimitive(output, mesh->view(), writeDisplacementMicromapExt);
 
     ToolMesh::Relations& relations = mesh->relations();
 
@@ -402,78 +382,78 @@ void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& exte
     assert(relations.bary == -1
            || (relations.group >= 0 && static_cast<size_t>(relations.group) < m_barys[relations.bary]->groups().size()));
 
-    // Assumes appendToTinygltfModel creates a single mesh with a single
-    // primitive.
-    assert(output.meshes.size() == meshID + 1);
-    assert(output.meshes.back().primitives.size() == 1);
-    tinygltf::Mesh&      outputMesh      = output.meshes.back();
-    tinygltf::Primitive& outputPrimitive = output.meshes.back().primitives.back();
-
     // Copy back the material ID. Between loading and saving the definitive
     // version lives on ToolMesh::Relations.
-    outputPrimitive.material = relations.material;
+    primitive.material = relations.material;
 
-    // Copy mesh mesh.primitive metadata from original gltf. Other gltf objects
-    // are copied by copyTinygltfModelExtra().
-    assert(uniquePrimNodes.size() == m_meshes.size());  // uniquePrimNodes should be populated identically to m_meshes.
-    if(meshID < uniquePrimNodes.size())
-    {
-      PrimitiveNode& prim_node = uniquePrimNodes[meshID];
-      outputMesh.name          = prim_node.mesh.name;
-      outputMesh.extras        = prim_node.mesh.extras;
-      outputMesh.weights       = prim_node.mesh.weights;
-      outputPrimitive.extras   = prim_node.primitive.extras;
-      outputPrimitive.mode     = prim_node.primitive.mode;
-      copyExtensions(prim_node.mesh.extensions, outputMesh.extensions);
-      copyExtensions(prim_node.primitive.extensions, outputPrimitive.extensions);
-    }
-
-    // Add micromesh references as each mesh+primitive as they're written. Note
-    // the output primitive is different to the ToolMesh primitive, which
+    // Add any micromesh references for each mesh+primitive as they're written.
+    // Note outputPrimitive is different to the ToolMesh primitive, which
     // belongs to the original ToolScene input file.
-    NV_displacement_micromap displacementMicromap;
-    getPrimitiveDisplacementMicromap(outputPrimitive, displacementMicromap);
-    displacementMicromap.micromap   = relations.bary;
-    displacementMicromap.groupIndex = relations.group;
-    displacementMicromap.mapOffset  = relations.mapOffset;
-    setPrimitiveDisplacementMicromap(outputPrimitive, displacementMicromap);
+    if(relations.bary == -1)
+    {
+      // Unlikely but clear any existing extension just to be safe
+      primitive.extensions.erase(NV_DISPLACEMENT_MICROMAP);
+    }
+    else
+    {
+      NV_displacement_micromap displacementMicromap;
+      getPrimitiveDisplacementMicromap(primitive, displacementMicromap);
+      displacementMicromap.micromap   = relations.bary;
+      displacementMicromap.groupIndex = relations.group;
+      displacementMicromap.mapOffset  = relations.mapOffset;
+      setPrimitiveDisplacementMicromap(primitive, displacementMicromap);
+    }
+
+    primitives.push_back(std::move(primitive));
   }
 
-  // Copy non-mesh data. This clobbers anything previously on the output model
-  // except mesh data.
-  copyTinygltfModelExtra(model(), output, extensionFilter);
-
-  // Re-writing meshes and mesh primitives in the order of uniquePrimNodes can
-  // change the node indices, so they need rewriting too.
-  assert(nodeToMeshIndices.size() == output.nodes.size());
-  assert(nodeToInstanceIndices.size() == output.nodes.size());
-  assert(primNodes.size() == m_primInstances.size());
-  for(size_t nodeID = 0; nodeID < output.nodes.size(); nodeID++)
+  // Second stage of writing meshes. Gltf Primitives are written to gltf Mesh
+  // structures based on gltfMeshToToolMeshes. Also copy gltf mesh and
+  // mesh.primitive metadata from the original gltf. Other gltf objects are copied
+  // by copyTinygltfModelExtra().
+  for(size_t gltfMeshIndex = 0; gltfMeshIndex < gltfMeshToToolMeshes.size(); ++gltfMeshIndex)
   {
-    if(output.nodes[nodeID].mesh != nodeToMeshIndices[nodeID])
+    tinygltf::Mesh& originalMesh = m_model->meshes[gltfMeshIndex];
+    tinygltf::Mesh  outputMesh;
+    assert(!gltfMeshToToolMeshes[gltfMeshIndex].empty());
+    assert(originalMesh.primitives.size() == gltfMeshToToolMeshes[gltfMeshIndex].size());
+    for(size_t i = 0; i < gltfMeshToToolMeshes[gltfMeshIndex].size(); ++i)
     {
-      LOGI("Reindexing node %zu's mesh from %i to %i\n", nodeID, output.nodes[nodeID].mesh, nodeToMeshIndices[nodeID]);
+      tinygltf::Primitive& originalPrimitive = originalMesh.primitives[i];
+      tinygltf::Primitive& outputPrimitive   = primitives[gltfMeshToToolMeshes[gltfMeshIndex][i]];
+      outputMesh.primitives.push_back(outputPrimitive);
+      outputMesh.primitives.back().extras = originalPrimitive.extras;
+      outputMesh.primitives.back().mode   = originalPrimitive.mode;
+      copyExtensions(originalPrimitive.extensions, outputMesh.primitives.back().extensions);
     }
-    output.nodes[nodeID].mesh = nodeToMeshIndices[nodeID];
 
-    if(nodeToInstanceIndices[nodeID] != -1)
-    {
-      output.nodes[nodeID].name = m_primInstances[nodeToInstanceIndices[nodeID]].name;
-    }
+    // A gltf Mesh has multiple primitives, which may produce multiple ToolMesh,
+    // each with its own Meta. Use the first when there are multiple.
+    const ToolMesh::Meta& firstMeta = m_meshes[gltfMeshToToolMeshes[gltfMeshIndex][0]]->meta();
+
+    // Restore gltf Mesh metadata
+    outputMesh.name    = firstMeta.name;
+    outputMesh.extras  = originalMesh.extras;
+    outputMesh.weights = originalMesh.weights;
+    copyExtensions(originalMesh.extensions, outputMesh.extensions);
+    output.meshes.push_back(std::move(outputMesh));
   }
 
-  // In the case there is a disparity between the number of ToolMesh and the original number of meshes
-  // The nodes of the scene will be adjusted; flatten and refer directly to the mesh
-  if(model().meshes.size() != output.meshes.size())
+  // Update instance metadata
+  for(auto& instance : m_instances)
   {
-    output.nodes.clear();
-    for(uint32_t i = 0; i < uniquePrimNodes.size(); i++)
+    assert(instance.gltfNode != -1);
+    if(output.nodes[instance.gltfNode].name != instance.name)
     {
-      auto& node = output.nodes.emplace_back(uniquePrimNodes[i].node);
-      node.mesh  = i;
+      LOGI("Renamed node %i from %s to %s\n", instance.gltfNode, output.nodes[instance.gltfNode].name.c_str(),
+           instance.name.c_str());
+      output.nodes[instance.gltfNode].name = instance.name;
     }
   }
+}
 
+void ToolScene::rewriteBarys(tinygltf::Model& output)
+{
   // Clear all the gltf micromaps as we always rewrite them (some stale ones may
   // have been copied by copyTinygltfModelExtra).
   tinygltf::Value::Array* gltfMicromaps = getNVMicromapExtensionMutable(*m_model);
@@ -501,6 +481,11 @@ void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& exte
       micromapExt.uri = bary->relativePath().string();
     }
     int32_t gltfMicromapIndex = addTinygltfMicromap(output, micromapExt);
+    if(static_cast<size_t>(gltfMicromapIndex) != i)
+    {
+      assert(false);
+      LOGE("Error: addTinygltfMicromap() added at unexpected index %i\n", gltfMicromapIndex);
+    }
   }
 
   // Warn if there is both bary and heightmap displacement
@@ -524,6 +509,43 @@ void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& exte
     }
   }
 
+  // Update the extensions used
+  bool hasHeightmapDisplacement = false;
+  bool hasNVDispacementMicromap = false;
+  bool hasNVMicromapTooling     = false;
+  for(auto& mesh : output.meshes)
+  {
+    for(auto& primitive : mesh.primitives)
+    {
+      NV_displacement_micromap displacementMicromap;
+      if(getPrimitiveDisplacementMicromap(primitive, displacementMicromap))
+      {
+        hasNVDispacementMicromap = true;
+      }
+      NV_micromap_tooling micromapTooling;
+      if(getPrimitiveMicromapTooling(primitive, micromapTooling))
+      {
+        hasNVMicromapTooling = true;
+      }
+    }
+  }
+  for(const auto& material : output.materials)
+  {
+    nvh::KHR_materials_displacement displacement;
+    if(getMaterialsDisplacement(material, displacement))
+    {
+      hasHeightmapDisplacement = true;
+    }
+  }
+  assert(m_barys.empty() == !hasNVDispacementMicromap);
+  setExtensionUsed(output.extensionsUsed, "KHR_materials_displacement", hasHeightmapDisplacement);
+  setExtensionUsed(output.extensionsUsed, NV_DISPLACEMENT_MICROMAP, hasNVDispacementMicromap);
+  setExtensionUsed(output.extensionsUsed, NV_MICROMAP_TOOLING, hasNVMicromapTooling);
+  setExtensionUsed(output.extensionsUsed, NV_MICROMAPS, hasNVDispacementMicromap || hasNVMicromapTooling);
+}
+
+void ToolScene::rewriteImages(tinygltf::Model& output)
+{
   // Replace images with those from the ToolScene.
   output.images.clear();
   output.images.resize(m_images.size());
@@ -569,39 +591,6 @@ void ToolScene::write(tinygltf::Model& output, const std::set<std::string>& exte
       gltfImage.image   = {rawBytes, rawBytes + image->info().totalBytes()};
     }
   }
-
-  // Update the extensions used
-  bool hasHeightmapDisplacement = false;
-  bool hasNVDispacementMicromap = false;
-  bool hasNVMicromapTooling     = false;
-  for(auto& mesh : output.meshes)
-  {
-    for(auto& primitive : mesh.primitives)
-    {
-      NV_displacement_micromap displacementMicromap;
-      if(getPrimitiveDisplacementMicromap(primitive, displacementMicromap))
-      {
-        hasNVDispacementMicromap = true;
-      }
-      NV_micromap_tooling micromapTooling;
-      if(getPrimitiveMicromapTooling(primitive, micromapTooling))
-      {
-        hasNVMicromapTooling = true;
-      }
-    }
-  }
-  for(const auto& material : output.materials)
-  {
-    nvh::KHR_materials_displacement displacement;
-    if(getMaterialsDisplacement(material, displacement))
-    {
-      hasHeightmapDisplacement = true;
-    }
-  }
-  setExtensionUsed(output.extensionsUsed, "KHR_materials_displacement", hasHeightmapDisplacement);
-  setExtensionUsed(output.extensionsUsed, NV_DISPLACEMENT_MICROMAP, hasNVDispacementMicromap);
-  setExtensionUsed(output.extensionsUsed, NV_MICROMAP_TOOLING, hasNVMicromapTooling);
-  setExtensionUsed(output.extensionsUsed, NV_MICROMAPS, hasNVDispacementMicromap || hasNVMicromapTooling);
 }
 
 bool ToolScene::save(const fs::path& filename)
@@ -623,6 +612,9 @@ bool ToolScene::save(const fs::path& filename)
       return false;
     }
   }
+
+  // Saving generated images sets the "original data" state, so record it first
+  bool originalImages = isOriginalImageData();
 
   // Save all the images. If there is no relative filename, it must have come
   // from an embedded gltf image and should be returned there.
@@ -649,12 +641,23 @@ bool ToolScene::save(const fs::path& filename)
   // combining both the original and the new data.
   tinygltf::Model  rewrittenModel;
   tinygltf::Model* outModel = m_model.get();
-  if(!isOriginalData())
+  if(!isOriginalMeshData())
   {
     LOGI("Rewriting the gltf model as new mesh data was generated\n");
     bool writeDisplacementMicromapExt = !m_barys.empty();
     write(rewrittenModel, {}, writeDisplacementMicromapExt);
     outModel = &rewrittenModel;
+  }
+  else
+  {
+    // Always rewrite the gltf NV_micromap array
+    rewriteBarys(*outModel);
+
+    // Rewrite outModel->m_images to use image paths saved above.
+    if(!originalImages)
+    {
+      rewriteImages(*outModel);
+    }
   }
 
   return saveTinygltfModel(filename, *outModel);
@@ -681,72 +684,75 @@ bool ToolScene::getHeightmap(int materialID, float& bias, float& scale, int& ima
 
 void ToolScene::createViews()
 {
-  // Get the list of all primitives
-  std::vector<PrimitiveNode> primNodes;
-  for(int nodeID : m_model->scenes[0].nodes)
-  {
-    collectPrimitiveNodes(nodeID, nvmath::mat4f(1), primNodes, m_model.get());
-  }
-
   // Adding a reference to all primitives and a flat list
   // of nodes representing the primitive in world space.
-  std::unordered_map<std::string, uint32_t> processedPrim;
+  std::vector<std::vector<int>>             gltfMeshToToolMeshes;
+  std::unordered_map<std::string, uint32_t> uniqueMeshPrim;
   bool                                      warnedDuplicates = false;
-  for(uint32_t i = 0; i < primNodes.size(); i++)
+  for(auto& mesh : m_model->meshes)
   {
-    PrimitiveNode& prim_node = primNodes[i];
-
-    NV_displacement_micromap displacement;
-    bool hasMicromap = getPrimitiveDisplacementMicromap(prim_node.primitive, displacement) && displacement.micromap != -1;
-    int32_t baryIndex{-1};
-    int32_t baryGroup{0};
-    if(hasMicromap)
+    gltfMeshToToolMeshes.emplace_back();
+    ToolMesh::Meta meta(mesh);
+    for(auto& primitive : mesh.primitives)
     {
-      if(displacement.micromap >= 0 && static_cast<size_t>(displacement.micromap) < barys().size() && displacement.groupIndex >= 0
-         && static_cast<size_t>(displacement.groupIndex) < barys()[displacement.micromap]->groups().size())
-      {
-        baryIndex = displacement.micromap;
-        baryGroup = displacement.groupIndex;
-      }
-      else
+      // Load and validate the glTF micromap reference
+      ToolMesh::Relations relations(primitive);
+      if(relations.bary != -1
+         && (relations.bary < 0 || static_cast<size_t>(relations.bary) >= barys().size() || relations.group < 0
+             || static_cast<size_t>(relations.group) >= barys()[relations.bary]->groups().size()))
       {
         LOGE("Error: NV_displacement_micromap contains invalid indices, micromap %i and groupIndex %i\n",
-             displacement.micromap, displacement.groupIndex);
+             relations.bary, relations.group);
+        relations.bary  = ToolMesh::Relations().bary;
+        relations.group = ToolMesh::Relations().group;
       }
-    }
 
-    // A key is made to consolidate multiple mesh primitives that reference identical data.
-    std::string key = makePrimitiveKey(prim_node.primitive);
+      // A key is made to consolidate multiple gltf mesh primitives that
+      // reference identical data.
+      std::string key = makePrimitiveKey(primitive);
 
-    // Adding a reference to the primitive only if it wasn't processed
-    if(processedPrim.find(key) == processedPrim.end())
-    {
-      const bary::ContentView* baryView{};
-      if(baryIndex != -1)
+      // Create a ToolMesh if the the mesh primitive is unique
+      auto it = uniqueMeshPrim.find(key);
+      if(it == uniqueMeshPrim.end())
       {
-        baryView = &barys()[baryIndex]->groups()[baryGroup];
+        const bary::ContentView* baryView{};
+        if(relations.bary != -1)
+        {
+          baryView = &barys()[relations.bary]->groups()[relations.group];
+        }
+
+        int meshIndex = static_cast<int>(m_meshes.size());
+        it            = uniqueMeshPrim.insert({key, meshIndex}).first;
+        m_meshes.push_back(std::make_unique<ToolMesh>(m_model.get(), relations, meta, &primitive, baryView));
+      }
+      else if(!warnedDuplicates)
+      {
+        // Leave a message, just in case this has unintended side effects
+        LOGI("Note: Consolidated duplicate primitives in gltf mesh primitives");
+        warnedDuplicates = true;
       }
 
-      // Keep info of the primitive reference for mesh instance
-      processedPrim[key] = static_cast<uint32_t>(m_meshes.size());
-      m_meshes.push_back(std::make_unique<ToolMesh>(m_model.get(), (tinygltf::Mesh*)&prim_node.mesh,
-                                                    (tinygltf::Primitive*)&prim_node.primitive, prim_node.matrix, baryView));
+      gltfMeshToToolMeshes.back().push_back(it->second);
     }
-    else if(!warnedDuplicates)
-    {
-      // Leave a message, just in case this has unintended side effects
-      LOGI("Note: Consolidated duplicate primitives in gltf mesh primitives");
-      warnedDuplicates = true;
-    }
+  }
 
-    // The primitive was processed, and we have a different matrices and material referencing the primitives
+  // Create instances from model nodes recursively
+  for(int nodeID : m_model->scenes[0].nodes)
+  {
+    if(nodeID < 0 || static_cast<size_t>(nodeID) > m_model->nodes.size())
     {
-      PrimitiveInstance primInstance;
-      primInstance.worldMatrix = prim_node.matrix;                 // Unique world matrix
-      primInstance.primMeshRef = processedPrim[key];               // Same data
-      primInstance.material    = primNodes[i].primitive.material;  // unique material
-      primInstance.name        = primNodes[i].node.name;
-      m_primInstances.push_back(primInstance);
+      LOGW("Invalid scene node reference %i\n", nodeID);
+      continue;
+    }
+    createInstances(*m_model, gltfMeshToToolMeshes, nodeID, nvmath::mat4f(1), m_instances);
+  }
+
+  // Build the first instance array to avoid linearly searching for every query
+  for(size_t i = 0; i < m_instances.size(); ++i)
+  {
+    if(m_meshes[m_instances[i].mesh]->relations().firstInstance == -1)
+    {
+      m_meshes[m_instances[i].mesh]->relations().firstInstance = static_cast<int>(i);
     }
   }
 
@@ -762,13 +768,10 @@ void ToolScene::createViews()
   }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Create a list of unique primitive in the hierarchy tree.
-//
 void ToolScene::setMesh(size_t meshIndex, std::unique_ptr<ToolMesh> mesh)
 {
   assert(meshIndex < m_meshes.size());
-  ToolMesh::Relations& relations = mesh->relations();
+  [[maybe_unused]] ToolMesh::Relations& relations = mesh->relations();
   assert(relations.bary == -1 || (relations.bary >= 0 && static_cast<size_t>(relations.bary) < m_barys.size()));
   assert(relations.bary == -1
          || (relations.group >= 0 && static_cast<size_t>(relations.group) < m_barys[relations.bary]->groups().size()));
@@ -801,7 +804,10 @@ void ToolScene::linkBary(size_t baryIndex, size_t groupIndex, size_t meshIndex)
   // Remove heightmap displacement from this mesh's material. Note: this may
   // remove heightmap displacement from other meshes that share this material,
   // but we don't have a system to duplicate and consolidate materials yet.
-  if(mesh->relations().material != -1)
+  float bias;
+  float scale;
+  int   imageIndex;
+  if(getHeightmap(mesh->relations().material, bias, scale, imageIndex))
   {
     tinygltf::Material& material = materials()[mesh->relations().material];
     auto                ext      = material.extensions.find(KHR_MATERIALS_DISPLACEMENT_NAME);
@@ -812,6 +818,49 @@ void ToolScene::linkBary(size_t baryIndex, size_t groupIndex, size_t meshIndex)
           "Removing KHR_materials_displacement from material %i (%s) after adding a micromap. This will affect all "
           "meshes using it.\n",
           mesh->relations().material, material.name.c_str());
+    }
+
+    // Count the remaining material references to this heightmap
+    int references = 0;
+    for(auto& material : materials())
+    {
+      nvh::KHR_materials_displacement displacement;
+      if(getMaterialsDisplacement(material, displacement))
+      {
+        if(textures()[displacement.displacementGeometryTexture].source == imageIndex)
+        {
+          ++references;
+        }
+      }
+    }
+
+    // If this is the last use of this heightmap, delete the image and re-index
+    // all the glTF textures.
+    if(references == 0)
+    {
+      LOGI(
+          "Removing image %s as there are no more heightmap references. It is possible this was referenced by other "
+          "material textures.\n",
+          m_images[imageIndex]->relativePath().string().c_str());
+      for(auto& texture : textures())
+      {
+        if(texture.source == imageIndex)
+        {
+          texture.source = -1;
+          // tinygltf writes "null" if there are no fields and won't read the
+          // result. Add a name to prevent this.
+          if(texture.name.empty())
+          {
+            std::string imageName = images()[imageIndex]->relativePath().string();
+            texture.name          = imageName.empty() ? "heightmap removed" : "removed " + imageName;
+          }
+        }
+        else if(texture.source > imageIndex)
+        {
+          --texture.source;
+        }
+      }
+      m_images.erase(m_images.begin() + imageIndex);
     }
   }
 }
@@ -824,25 +873,20 @@ void ToolScene::clearBarys()
     mesh->relations().bary  = -1;
     mesh->relations().group = 0;
   }
-
-  for(auto& bary : m_barys)
-  {
-    bary->destroy();
-  }
   m_barys.clear();
 }
 
 uint32_t ToolScene::createImage()
 {
   auto index = static_cast<uint32_t>(m_images.size());
-  m_images.push_back(std::make_unique<micromesh_tool::ToolImage>());
+  // Place an invalid image as a marker
+  m_images.push_back(micromesh_tool::ToolImage::createInvalid());
   return index;
 }
 
-ToolImage& ToolScene::createAuxImage()
+void ToolScene::appendAuxImage(std::unique_ptr<ToolImage> image)
 {
-  m_auxImages.push_back(std::make_unique<micromesh_tool::ToolImage>());
-  return *m_auxImages.back();
+  m_auxImages.push_back(std::move(image));
 }
 
 bool ToolScene::loadBarys(const fs::path& basePath)
@@ -866,22 +910,19 @@ bool ToolScene::loadBarys(const fs::path& basePath)
     }
 
     fs::path baryFilename = dlib::urldecode(micromapExt.uri);
-    m_barys[i]            = std::make_unique<ToolBary>();
-    if(m_barys[i]->create(basePath, baryFilename) != micromesh::Result::eSuccess)
+    m_barys[i]            = ToolBary::create(basePath, baryFilename);
+    if(!m_barys[i])
     {
       m_barys.clear();
       return false;
     }
   }
 
-  // Clear all the gltf micromap references now that we have transferred them to
-  // m_barys. They are rewritten on save() anyway, but this avoids accidental
-  // stale data access.
-  tinygltf::Value::Array* gltfMicromaps = getNVMicromapExtensionMutable(*m_model);
-  if(gltfMicromaps)
-  {
-    gltfMicromaps->clear();
-  }
+  // Clear all the micromap references from the tinygltf Model, now that we have
+  // transferred them to m_barys. New gltf extensions will be written on save()
+  // anyway, but this avoids merging old references from m_model when saving and
+  // accidental stale access via model() by micromesh tools beforehand.
+  m_model->extensions.erase(NV_MICROMAPS);
 
   return true;
 }
@@ -904,13 +945,17 @@ bool ToolScene::loadImages(const fs::path& basePath)
 
   for(auto& gltfImage : m_model->images)
   {
-    m_images.push_back(std::make_unique<micromesh_tool::ToolImage>());
+    m_images.emplace_back();
     if(!gltfImage.uri.empty())
     {
       fs::path basePathAbs  = basePath.empty() ? fs::current_path() : fs::absolute(basePath);
       fs::path relativePath = dlib::urldecode(gltfImage.uri);
-      // Ignore image load failures. An error will already be printed.
-      (void)m_images.back()->create(basePathAbs, relativePath);
+      m_images.back()       = ToolImage::create(basePathAbs, relativePath);
+      if(!m_images.back())
+      {
+        LOGE("Failed to create ToolImage for scene\n");
+        return false;
+      }
     }
     else if(!gltfImage.image.empty())
     {
@@ -921,7 +966,13 @@ bool ToolScene::loadImages(const fs::path& basePath)
       info.componentBitDepth = gltfImage.bits;
       // Ignore image load failures. An error will already be printed.
       std::string name = (gltfImage.name.empty() ? "embedded_image_" + std::to_string(m_images.size() - 1) : gltfImage.name);
-      if(m_images.back()->create(info, name + ".png") == micromesh::Result::eSuccess)
+      m_images.back()  = ToolImage::create(info, name + ".png");
+      if(!m_images.back())
+      {
+        LOGE("Failed to create ToolImage for scene\n");
+        return false;
+      }
+      if(m_images.back())
       {
         memcpy(m_images.back()->raw(), gltfImage.image.data(), gltfImage.image.size());
       }
@@ -960,15 +1011,17 @@ bool ToolScene::loadImages(const fs::path& basePath)
 
       // Create the image from the raw data. ToolImage takes ownership of data
       // and will free it. Ignore image load failures.
-      if(m_images.back()->create(info, gltfImage.name, data) == micromesh::Result::eSuccess)
+      m_images.back() = ToolImage::create(info, gltfImage.name, data);
+      if(!m_images.back())
       {
         LOGE("Error: failed to decompress embedded image %s\n", gltfImage.name.c_str());
-        continue;
+        return false;
       }
     }
     else
     {
       LOGW("Warning: invalid gltf - empty gltf image\n");
+      m_images.back() = ToolImage::createInvalid();
     }
   }
   return true;
@@ -979,9 +1032,9 @@ ToolSceneDimensions::ToolSceneDimensions(const ToolScene& scene)
   nvh::Bbox scnBbox;
 
   // Find the union of all object space bounding boxes transformed to world space
-  for(auto& instance : scene.getPrimitiveInstances())
+  for(auto& instance : scene.instances())
   {
-    auto&           mesh        = scene.meshes()[instance.primMeshRef];
+    auto&           mesh        = scene.meshes()[instance.mesh];
     bool            foundMinMax = false;
     nvmath::vec3f   posMin;
     nvmath::vec3f   posMax;
@@ -1024,6 +1077,12 @@ ToolSceneDimensions::ToolSceneDimensions(const ToolScene& scene)
       posMax         = minMax.second;
     }
 
+    if(!nvmath::isreal(posMin) || !nvmath::isreal(posMax))
+    {
+      LOGW("Warning: mesh %i has an invalid bounding box\n", instance.mesh);
+      continue;
+    }
+
     nvh::Bbox bbox(posMin, posMax);
     bbox = bbox.transform(instance.worldMatrix);
     scnBbox.insert(bbox);
@@ -1057,6 +1116,10 @@ ToolSceneStats::ToolSceneStats(const ToolScene& scene)
     if(mesh->relations().material != -1)
     {
       auto& material = scene.materials()[mesh->relations().material];
+      if(material.normalTexture.index != -1)
+      {
+        normalmaps = true;
+      }
       if(mesh->view().vertexTangents.empty() && material.normalTexture.index != -1)
       {
         normalmapsMissingTangents = true;

@@ -19,9 +19,26 @@
 #include "nvml_monitor.hpp"
 #include "imgui_helper.h"
 #include <numeric>
+#include <type_traits>
 
 namespace nvvkhl {
 
+// Unsafe. Temporary workaround for ImGui_Extra
+template <class EnumTo, EnumTo ToDefault, class EnumFrom, EnumFrom FromValue>
+struct FallbackEnumCast
+{
+  using ToType   = std::underlying_type_t<EnumTo>;
+  using FromType = std::underlying_type_t<EnumFrom>;
+  static EnumTo value()
+  {
+    ToType result = ToDefault;
+    if constexpr(FromValue <= std::numeric_limits<ToType>::max())
+    {
+      result = static_cast<ToType>(FromValue);
+    }
+    return static_cast<EnumTo>(result);
+  }
+};
 
 //extern SampleAppLog g_logger;
 struct ElementNvml : public nvvkhl::IAppElement
@@ -70,7 +87,7 @@ struct ElementNvml : public nvvkhl::IAppElement
   //
   bool guiGpuMeasures()
   {
-    static const std::vector<const char*> t{"KB", "MB", "GB", "TB"};
+    static const std::vector<const char*> t{"", "KiB", "MiB", "GiB", "TiB"};
 
 #if defined(NVP_SUPPORTS_NVML)
     if(m_nvmlMonitor->isValid() == false)
@@ -79,21 +96,18 @@ struct ElementNvml : public nvvkhl::IAppElement
       return false;
     }
 
-    uint32_t offset = m_nvmlMonitor->getOffset();
+    int offset = m_nvmlMonitor->getOffset();
 
     for(uint32_t g = 0; g < m_nvmlMonitor->nbGpu(); g++)  // Number of gpu
     {
       const NvmlMonitor::GpuInfo& i = m_nvmlMonitor->getInfo(g);
       const NvmlMonitor::Measure& m = m_nvmlMonitor->getMeasures(g);
       char                        progtext[64];
-      float                       divider = 1.0F;
-      int                         level   = 0;
-      while(i.max_mem / divider > 1000)
-      {
-        divider *= 1000;
-        level++;
-      }
-      sprintf(progtext, "%3.2f/%3.2f %s", m.memory[offset] / divider, i.max_mem / divider, t[level]);
+      size_t                      level =
+          std::min(static_cast<size_t>(log2(static_cast<double>(std::max(UINT64_C(1), i.max_mem))) / 10), t.size() - 1);
+      double divider = static_cast<double>(UINT64_C(1) << (level * 10));
+      sprintf(progtext, "%3.2f/%3.2f %s", static_cast<double>(m.last_memory) / divider,
+              static_cast<double>(i.max_mem) / divider, t[level]);
 
       // Load
       ImGui::Text("GPU: %s", i.name.c_str());
@@ -107,7 +121,8 @@ struct ElementNvml : public nvvkhl::IAppElement
       // Memory
       ImGuiH::PropertyEditor::entry("Memory", [&] {
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, (ImVec4)ImColor::HSV(0.6F, 0.5F, 0.5F));
-        ImGui::ProgressBar(m.memory[offset] / float(i.max_mem), ImVec2(-1.f, 0.f), progtext);
+        float memUsage = static_cast<float>((m.last_memory * 1000) / i.max_mem) / 1000.0F;
+        ImGui::ProgressBar(memUsage, ImVec2(-1.f, 0.f), progtext);
         ImGui::PopStyleColor();
         return false;
       });
@@ -121,11 +136,11 @@ struct ElementNvml : public nvvkhl::IAppElement
     static double refresh_time = ImGui::GetTime();
     if(refresh_time < ImGui::GetTime() - 1)  // Create data at fixed 60 Hz rate for the demo
     {
-      average           = 0;
-      int values_offset = 0;
+      average = 0;
       for(int i = 0; i < 5; i++)
       {
-        values_offset = (offset - i) % m_nvmlMonitor->getSysInfo().cpu.size();
+        size_t sampleCount   = static_cast<int>(m_nvmlMonitor->getSysInfo().cpu.size());
+        size_t values_offset = (offset - i + sampleCount) % sampleCount;
         average += m_nvmlMonitor->getSysInfo().cpu[values_offset];
       }
       average /= 5.0F;
@@ -147,8 +162,8 @@ struct ElementNvml : public nvvkhl::IAppElement
 
       if(ImGui::TreeNode("Graph", "Graph: %s", i.name.c_str()))
       {
-        ImGui::ImPlotMulti datas[2];
-        datas[0].plot_type     = static_cast<ImGuiPlotType>(ImGuiPlotType_Area);
+        ImGui::ImPlotMulti datas[2] = {};
+        datas[0].plot_type = FallbackEnumCast<ImGuiPlotType, ImGuiPlotType_Lines, ImGui_Extra, ImGuiPlotType_Area>::value();
         datas[0].name          = "Load";
         datas[0].color         = ImColor(0.07f, 0.9f, 0.06f, 1.0f);
         datas[0].thickness     = 1.5;
@@ -159,14 +174,14 @@ struct ElementNvml : public nvvkhl::IAppElement
         datas[0].scale_max     = 100;
 
         datas[1].plot_type     = ImGuiPlotType_Histogram;
-        datas[1].name          = "Mem";
+        datas[1].name          = "Mem (KiB)";
         datas[1].color         = ImColor(0.06f, 0.6f, 0.97f, 0.8f);
         datas[1].thickness     = 2.0;
-        datas[1].data          = m.memory.data();
-        datas[1].values_count  = (int)m.memory.size();
+        datas[1].data          = m.memoryKB.data();
+        datas[1].values_count  = (int)m.memoryKB.size();
         datas[1].values_offset = offset + 1;
         datas[1].scale_min     = 0;
-        datas[1].scale_max     = float(i.max_mem);
+        datas[1].scale_max     = float(i.max_mem / 1024);
 
 
         std::string overlay = "Load: " + std::to_string((int)m.load[offset]) + " %";

@@ -116,6 +116,14 @@ bool getPrimitiveLegacyBarycentricDisplacement(const tinygltf::Primitive& primit
 void setPrimitiveDisplacementMicromap(tinygltf::Primitive& primitive, const NV_displacement_micromap& extension)
 {
   NV_displacement_micromap defaults;
+
+  // Clear the extension object if providing all default values
+  if(memcmp(&defaults, &extension, sizeof(defaults)) == 0)
+  {
+    primitive.extensions.erase(NV_DISPLACEMENT_MICROMAP);
+    return;
+  }
+
   using namespace tinygltf;
   Value::Object ext;
   if(defaults.directionBounds != extension.directionBounds)

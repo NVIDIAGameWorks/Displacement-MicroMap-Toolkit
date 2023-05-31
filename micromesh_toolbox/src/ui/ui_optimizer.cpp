@@ -17,8 +17,6 @@ void uiOptimizer(bool& use_optimizer, tool_optimize::ToolOptimizeArgs& args)
 {
   using PE = ImGuiH::PropertyEditor;
 
-  static const char* ImageFilter = "Images|*.jpg;*.png;*.tga;*.bmp;*.psd;*.gif;*.hdr;*.pic;*;pnm;*.exr";
-
   bool open_optim = ImGui::CollapsingHeader("Optimizer", ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_AllowItemOverlap);
   ImGui::SameLine();
   ImGui::TableNextColumn();

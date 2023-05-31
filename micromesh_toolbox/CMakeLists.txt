@@ -36,6 +36,7 @@ list(APPEND COMMON_SOURCE_FILES ${OTHER_SOURCE_FILES})
 
 
 _add_package_KTX()
+_add_package_NVML()
 _add_package_VMA()
 
 
@@ -45,18 +46,6 @@ add_executable(${PROJECT_NAME}
     ${COMMON_SOURCE_FILES} 
     ${PACKAGE_SOURCE_FILES} 
     )
-
-# NVML
-set(NVML_DIR ${NVPRO_CORE_DIR}/third_party/binaries/nvml)
-target_include_directories(${PROJECT_NAME} PRIVATE 
-    ${NVML_DIR}
-    )
-if(WIN32) # Windows
-  add_compile_definitions(NVP_SUPPORTS_NVML)
-  set(NVML_LIBRARY_PATH "${NVML_DIR}/lib/x64/nvml.lib")
-else() # Linux
-  set(NVML_LIBRARY_PATH "nvidia-ml")
-endif()
 
 
 target_include_directories(${PROJECT_NAME} PRIVATE    
@@ -70,7 +59,6 @@ target_link_libraries (${PROJECT_NAME}
     ${PLATFORM_LIBRARIES} 
     ${LIBRARIES_OPTIMIZED} 
     nvpro_core
-        ${NVML_LIBRARY_PATH}
     )
 
  # Micromesh
@@ -165,6 +153,9 @@ file(GLOB SHD_SRC # Shader sources
     ${SHD_DIR}/draw_compressed_basic.mesh.glsl
     ${SHD_DIR}/draw_compressed_basic.task.glsl
     ${SHD_DIR}/draw_compressed_basic.frag.glsl
+    ${SHD_DIR}/draw_heightmap.mesh.glsl
+    ${SHD_DIR}/draw_heightmap.task.glsl
+    ${SHD_DIR}/draw_heightmap.frag.glsl
     )
     
 file(GLOB SHD_HDR  # Shader headers

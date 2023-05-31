@@ -32,15 +32,35 @@ struct ToolSceneDimensions;
 class ToolMesh
 {
 public:
+  struct Relations
+  {
+    Relations() = default;
+    Relations(const tinygltf::Primitive& primitive);
+
+    int32_t bary{-1};           // scene.barys()[bary]. May be -1.
+    int32_t group{0};           // scene.barys()[bary].groups()[group]
+    int32_t mapOffset{0};       // NV_displacement_micromap::mapOffset offset to mapIndices
+    int32_t material{-1};       // scene.materials()[material]. May be -1.
+    int32_t firstInstance{-1};  // scene.instances()[firstInstance]. May be -1.
+  };
+
+  struct Meta
+  {
+    Meta() = default;
+    Meta(const tinygltf::Mesh& tinygltfMesh);
+
+    std::string name;
+  };
+
   // Constructs a ToolMesh with the initial view populated from the gltf model.
   // Warning: makeResizableMeshViewCallback() does not copy data after a resize,
   // so any ToolMesh::view().resize() will result in cleared new data. There are
   // currently no use cases where new/resized data is not completely rewritten.
-  ToolMesh(tinygltf::Model*         model,
-           tinygltf::Mesh*          mesh,
-           tinygltf::Primitive*     primitive,
-           nvmath::mat4f            firstInstanceTransform,
-           const bary::ContentView* baryMeshView);
+  ToolMesh(tinygltf::Model*           model,
+           const Relations&           relations,
+           const Meta&                meta,
+           const tinygltf::Primitive* primitive,
+           const bary::ContentView*   baryMeshView);
 
   // Constructs a ToolMesh by moving data out of a MeshData, keeping non-mesh
   // gltf references from an original ToolMesh created from a model. This
@@ -48,7 +68,6 @@ public:
   explicit ToolMesh(const ToolMesh& other, meshops::MeshData&& initialData)
       : m_aux(std::move(initialData))
       , m_view(m_aux, makeResizableMeshViewCallback(m_aux))
-      , m_firstInstanceTransform(other.m_firstInstanceTransform)
       , m_relations(other.m_relations)
       , m_meta(other.m_meta)
   {
@@ -58,37 +77,21 @@ public:
   explicit ToolMesh(const ToolMesh& other)
       : m_aux(other.view())
       , m_view(m_aux, makeResizableMeshViewCallback(m_aux))
-      , m_firstInstanceTransform(other.firstInstanceTransform())
       , m_relations(other.relations())
       , m_meta(other.m_meta)
   {
   }
 
-  bool          isOriginalData() const;
-  nvmath::mat4f firstInstanceTransform() const;
+  bool isOriginalData() const;
 
   // Be very careful not to take a copy of the returned ResizableMeshView as
   // resize() will not update the view stored in ToolMesh.
   meshops::ResizableMeshView&       view() { return m_view; }
   const meshops::ResizableMeshView& view() const { return m_view; }
-
-  struct Relations
-  {
-    int32_t bary{-1};      // scene.barys()[bary]
-    int32_t group{0};      // scene.barys()[bary].groups()[group]
-    int32_t mapOffset{0};  // NV_displacement_micromap::mapOffset offset to mapIndices
-    int32_t material{-1};  // scene.materials()[material]
-  };
-
-  struct Meta
-  {
-    std::string name;
-  };
-
-  Relations&           relations() { return m_relations; }
-  const Relations&     relations() const { return m_relations; }
-  Meta&                meta() { return m_meta; }
-  const Meta&          meta() const { return m_meta; }
+  Relations&                        relations() { return m_relations; }
+  const Relations&                  relations() const { return m_relations; }
+  Meta&                             meta() { return m_meta; }
+  const Meta&                       meta() const { return m_meta; }
 
 private:
   // Auxiliary mesh data. May be populated when rewriting mesh data or even for
@@ -102,13 +105,9 @@ private:
   // attribute pointers to instead point to m_meshAux.
   meshops::ResizableMeshView m_view;
 
-  // The input glTF model may instantiate the mesh any number of times. This
-  // contains the world space transform for the first.
-  nvmath::mat4f m_firstInstanceTransform;
-
   // May point to stale mesh data if !isOriginalData().
   // TODO: can we remove this? Maybe replace with a material reference?
-  tinygltf::Primitive* m_gltfPrimitive{nullptr};
+  const tinygltf::Primitive* m_gltfPrimitive{nullptr};
 
   Relations m_relations;
 
@@ -117,7 +116,7 @@ private:
   // Allow access to the primitive from ToolSceneDimensions so it can access the
   // gltf position min/maxs.
   friend struct ToolSceneDimensions;
-  tinygltf::Primitive* gltfPrimitive() const { return m_gltfPrimitive; }
+  const tinygltf::Primitive* gltfPrimitive() const { return m_gltfPrimitive; }
 };
 
 }  // namespace micromesh_tool

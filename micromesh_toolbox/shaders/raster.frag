@@ -40,6 +40,6 @@ void main()
   TriangleAttribute triInfo;
   HitState          hit;  // Interpolated Hit from vertex shader
   vec3              toEye;
-  rasterLoad(gl_BaryCoordNV, gltfMat, pinfo, triInfo, hit, toEye);
-  outColor = rasterShade(gl_BaryCoordNV, gltfMat, pinfo, triInfo, hit, toEye);
+  rasterLoad(IN.pos, gl_BaryCoordNV, gl_PrimitiveID, gltfMat, pinfo, triInfo, hit, toEye);
+  outColor = rasterShade(gl_BaryCoordNV, gltfMat, pinfo, triInfo, hit, toEye, gl_PrimitiveID);
 }

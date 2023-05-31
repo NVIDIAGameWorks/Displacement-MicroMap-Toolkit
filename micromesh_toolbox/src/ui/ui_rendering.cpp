@@ -123,8 +123,11 @@ void UiRendering::sceneWarnings(const ViewerSettings::RenderView& view)
 
   if(scene->stats() && scene->stats()->heightmaps)
   {
-    ImGui::TextColored(warningColor, "Heightmaps exist but are not rendered");
-    ImGuiH::tooltip("Heightmaps are not rendered but will be applied when running Displaced Tessellate or the Baker", true);
+    ImGui::TextColored(warningColor, "Some meshes have heightmap displacement");
+    ImGuiH::tooltip(
+        "When using rasterization, meshes with glTF KHR_materials_displacement will be subdivided and displaced. See "
+        "Raster -> Heightmaps for settings.",
+        true);
   }
 
   if(view.baked && scene->getToolSceneRtx() && !scene->getToolSceneVK()->barys().empty() && !scene->getToolSceneVK()->hasRtxMicromesh())

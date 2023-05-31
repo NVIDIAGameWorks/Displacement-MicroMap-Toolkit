@@ -15,7 +15,7 @@ namespace microdisp {
 
 void MicromeshSubTriangleDecoderVK::init(ResourcesVK&             res,
                                          const bary::ContentView& bary,
-                                         uint8_t*                 decimateEdgeFlags,
+                                         const uint8_t*           decimateEdgeFlags,
                                          uint32_t                 maxSubdivLevel,
                                          bool                     useBaseTriangles,
                                          bool                     withAttributes,
@@ -40,17 +40,9 @@ void MicromeshSubTriangleDecoderVK::init(ResourcesVK&             res,
     initAttributes(m_micro, res, bary, maxSubdivLevel, numThreads);
   }
 
-  // common look-up tables independent of data
-
-  m_micro.descends = res.createBuffer(sizeof(MicromeshSTriDescend) * MICRO_STRI_DESCENDS_COUNT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  m_micro.triangleIndices =
-      res.createBuffer(sizeof(uint32_t) * (MICRO_MESHLET_PRIMS * MICRO_MESHLET_TOPOS), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  // one set of vertices for each partID config, plus zeroed dummy to allow safe out of bounds access
-  m_micro.vertices = res.createBuffer(sizeof(MicromeshSTriVertex) * MICRO_STRI_VTX_COUNT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
   nvvk::StagingMemoryManager* staging = res.m_allocator.getStaging();
   VkCommandBuffer             cmd     = res.cmdBuffer();
-  m_micro.uploadMeshDatasBinding(staging, cmd);
+  m_micro.uploadMeshDatasBinding(staging, cmd, &m_parts);
 
   {
     if(useBaseTriangles)
@@ -62,25 +54,12 @@ void MicromeshSubTriangleDecoderVK::init(ResourcesVK&             res,
       uploadMicroSubTriangles(staging, cmd, bary, decimateEdgeFlags, maxSubdivLevel, numThreads);
     }
   }
-
-  {
-    MicroSplitParts splits;
-
-    // setup indices
-    splits.uploadTriangleIndices(staging, cmd, m_micro.triangleIndices, false);
-
-    // setup vertices
-    uploadVertices(staging, cmd, splits);
-
-    // setup descend info
-    uploadDescends(staging, cmd, splits);
-  }
 }
 
 void MicromeshSubTriangleDecoderVK::uploadMicroSubTriangles(nvvk::StagingMemoryManager* staging,
                                                             VkCommandBuffer             cmd,
                                                             const bary::ContentView&    bary,
-                                                            uint8_t*                    decimateEdgeFlags,
+                                                            const uint8_t*              decimateEdgeFlags,
                                                             uint32_t                    maxSubdivLevel,
                                                             uint32_t                    numThreads)
 {
@@ -90,15 +69,10 @@ void MicromeshSubTriangleDecoderVK::uploadMicroSubTriangles(nvvk::StagingMemoryM
   assert(bary.basic.groupsCount == 1);
   const bary::BasicView& basic          = bary.basic;
   const bary::Group&     baryGroup      = basic.groups[0];
-  const size_t           minMaxByteSize = basic.triangleMinMaxsInfo->elementByteSize * 2;
 
   MicromeshSubTri* subTriData =
       staging->cmdToBufferT<MicromeshSubTri>(cmd, meshData.subTriangles.buffer, meshData.subTriangles.info.offset,
                                              meshData.subTriangles.info.range);
-
-  nvmath::vec4f* sphereData =
-      staging->cmdToBufferT<nvmath::vec4f>(cmd, meshData.subSpheres.buffer, meshData.subSpheres.info.offset,
-                                           meshData.subSpheres.info.range);
 
   baryutils::BarySplitTable splitTable;
   splitTable.init(bary::Format::eDispC1_r11_unorm_block, maxSubdivLevel);
@@ -131,10 +105,6 @@ void MicromeshSubTriangleDecoderVK::uploadMicroSubTriangles(nvvk::StagingMemoryM
         const size_t          baryGlobalTriIdx = baryGroup.triangleFirst + baryLocalTriIdx;
         const bary::Triangle& baseTri          = basic.triangles[baryGlobalTriIdx];
         const SubRange&       baseSubRange     = subRanges[baryLocalTriIdx];
-        const uint16_t* baseMinMaxs = reinterpret_cast<const uint16_t*>(basic.triangleMinMaxs + baryGlobalTriIdx * minMaxByteSize);
-
-        float valueBias  = baryGroup.floatBias.r;
-        float valueScale = baryGroup.floatScale.r;
 
         const baryutils::BarySplitTable::Entry& splitConfig = splitTable.get(baseTri.blockFormatDispC1, baseTri.subdivLevel);
 
@@ -146,31 +116,15 @@ void MicromeshSubTriangleDecoderVK::uploadMicroSubTriangles(nvvk::StagingMemoryM
 
           uint32_t formatIndex = getFormatIndex(baseTri.blockFormat);
 
-          MicromeshSubTri& micro  = subTriData[subMeshIdx];
-          nvmath::vec4f&   sphere = sphereData[subMeshIdx];
-
-          const int32_t upperValueBound = 0x7FF;
-          const int32_t upperCullBound  = MICRO_SUB_CULLDIST_MASK;
-
-          // FIXME no longer per-sub-triangle minmaxs in default files
-          float minDisp = float(baseMinMaxs[0]) / float(upperValueBound) * valueScale + valueBias;
-          float maxDisp = float(baseMinMaxs[1]) / float(upperValueBound) * valueScale + valueBias;
-
-          //float   delta = !mesh.directionBoundsAreUniform && meshSet.attributes.directionBounds.empty() ? 0.0f : -0.5f;
-          //float   absDist  = std::max(std::abs(minDisp + delta), std::abs(maxDisp + delta));
-          //int32_t cullDist = int32_t(((absDist - valueBias) / valueScale) * float(upperCullBound));
-          //cullDist         = std::min(std::max(cullDist, 1), upperCullBound);
+          MicromeshSubTri& micro = subTriData[subMeshIdx];
 
           const uint32_t baseTopo =
               (decimateEdgeFlags ? bary::baryBlockTriangleBaseToLocalFlags(&subSplit, decimateEdgeFlags[meshGlobalTriIdx]) : 0);
 
           micro.dataOffset = static_cast<uint32_t>((size_t(baseTri.valuesOffset) + subSplit.blockByteOffset) / sizeof(uint32_t));
-
           micro.baseOffset      = {uint16_t(subSplit.vertices[0].u), uint16_t(subSplit.vertices[0].v)};
           micro.baseTriangleIdx = static_cast<uint32_t>(baryLocalTriIdx);
           micro.packedBits      = 0;
-          int32_t mapOffset{0};  // An unsigned integer that will be added to each of the mapIndices values.
-
           micro.packedBits |= packBits(baseTri.subdivLevel, MICRO_SUB_LVL_SHIFT, MICRO_SUB_LVL_WIDTH);
           micro.packedBits |= packBits(baseTopo, MICRO_SUB_TOPO_SHIFT, MICRO_SUB_TOPO_WIDTH);
           micro.packedBits |= packBits(formatIndex, MICRO_SUB_FMT_SHIFT, MICRO_SUB_FMT_WIDTH);
@@ -187,7 +141,7 @@ void MicromeshSubTriangleDecoderVK::uploadMicroSubTriangles(nvvk::StagingMemoryM
 void MicromeshSubTriangleDecoderVK::uploadMicroBaseTriangles(nvvk::StagingMemoryManager* staging,
                                                              VkCommandBuffer             cmd,
                                                              const bary::ContentView&    bary,
-                                                             uint8_t*                    decimateEdgeFlags,
+                                                             const uint8_t*              decimateEdgeFlags,
                                                              uint32_t                    maxSubdivLevel,
                                                              uint32_t                    numThreads)
 {
@@ -197,15 +151,10 @@ void MicromeshSubTriangleDecoderVK::uploadMicroBaseTriangles(nvvk::StagingMemory
   assert(bary.basic.groupsCount == 1);
   const bary::BasicView& basic          = bary.basic;
   const bary::Group&     baryGroup      = basic.groups[0];
-  const size_t           minMaxByteSize = basic.triangleMinMaxsInfo->elementByteSize * 2;
 
   MicromeshBaseTri* baseTriData =
       staging->cmdToBufferT<MicromeshBaseTri>(cmd, meshData.baseTriangles.buffer, meshData.baseTriangles.info.offset,
                                               meshData.baseTriangles.info.range);
-
-  nvmath::vec4f* sphereData =
-      staging->cmdToBufferT<nvmath::vec4f>(cmd, meshData.baseSpheres.buffer, meshData.baseSpheres.info.offset,
-                                           meshData.baseSpheres.info.range);
 
   nvh::parallel_batches(
       baryGroup.triangleCount,
@@ -213,31 +162,12 @@ void MicromeshSubTriangleDecoderVK::uploadMicroBaseTriangles(nvvk::StagingMemory
         const size_t          meshGlobalTriIdx = baryLocalTriIdx;
         const size_t          baryGlobalTriIdx = baryGroup.triangleFirst + baryLocalTriIdx;
         const bary::Triangle& baseTri          = basic.triangles[baryGlobalTriIdx];
-        const uint16_t* baseMinMaxs = reinterpret_cast<const uint16_t*>(basic.triangleMinMaxs + baryGlobalTriIdx * minMaxByteSize);
-
-        uint32_t formatIndex = getFormatIndex(baseTri.blockFormat);
-
-        float valueBias  = baryGroup.floatBias.r;
-        float valueScale = baryGroup.floatScale.r;
-
-        MicromeshBaseTri& micro  = baseTriData[baryLocalTriIdx];
-        nvmath::vec4f&    sphere = sphereData[baryLocalTriIdx];
-
-        const int32_t upperValueBound = 0x7FF;
-        const int32_t upperCullBound  = MICRO_BASE_CULLDIST_MASK;
-
-        float minDisp = float(baseMinMaxs[0]) / float(upperValueBound) * valueScale + valueBias;
-        float maxDisp = float(baseMinMaxs[1]) / float(upperValueBound) * valueScale + valueBias;
-
-        //float   delta    = !mesh.directionBoundsAreUniform && meshSet.attributes.directionBounds.empty() ? 0.0f : -0.5f;
-        //float   absDist  = std::max(std::abs(minDisp + delta), std::abs(maxDisp + delta));
-        //int32_t cullDist = int32_t(((absDist - valueBias) / valueScale) * float(upperCullBound));
-        //cullDist         = std::min(std::max(cullDist, 1), upperCullBound);
+        uint32_t              formatIndex      = getFormatIndex(baseTri.blockFormat);
+        MicromeshBaseTri&     micro            = baseTriData[baryLocalTriIdx];
 
         const uint32_t baseTopo = (decimateEdgeFlags ? decimateEdgeFlags[meshGlobalTriIdx] : 0);
 
         micro.dataOffset = (baseTri.valuesOffset) / sizeof(uint32_t);
-
         micro.packedBits = 0;
         micro.packedBits |= packBits(baseTri.subdivLevel, MICRO_BASE_LVL_SHIFT, MICRO_BASE_LVL_WIDTH);
         micro.packedBits |= packBits(baseTopo, MICRO_BASE_TOPO_SHIFT, MICRO_BASE_TOPO_WIDTH);
@@ -249,13 +179,13 @@ void MicromeshSubTriangleDecoderVK::uploadMicroBaseTriangles(nvvk::StagingMemory
       numThreads);
 }
 
-void MicromeshSubTriangleDecoderVK::uploadVertices(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits)
+static void uploadVertices(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits, MicromeshSplitPartsVk& splitParts)
 {
   MicromeshSTriVertex* verticesAll =
-      staging->cmdToBufferT<MicromeshSTriVertex>(cmd, m_micro.vertices.buffer, m_micro.vertices.info.offset,
-                                                 m_micro.vertices.info.range);
+      staging->cmdToBufferT<MicromeshSTriVertex>(cmd, splitParts.vertices.buffer, splitParts.vertices.info.offset,
+                                                 splitParts.vertices.info.range);
 
-  memset(verticesAll, 0, m_micro.vertices.info.range);
+  memset(verticesAll, 0, splitParts.vertices.info.range);
 
   uint32_t totalMeshlets = 0;
   for(uint32_t subdivLevel = 3; subdivLevel <= 5; subdivLevel++)
@@ -303,11 +233,11 @@ void MicromeshSubTriangleDecoderVK::uploadVertices(nvvk::StagingMemoryManager* s
   }
 }
 
-void MicromeshSubTriangleDecoderVK::uploadDescends(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits)
+static void uploadDescends(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicroSplitParts& splits, MicromeshSplitPartsVk& splitParts)
 {
   MicromeshSTriDescend* descendInfosAll =
-      staging->cmdToBufferT<MicromeshSTriDescend>(cmd, m_micro.descends.buffer, m_micro.descends.info.offset,
-                                                  m_micro.descends.info.range);
+      staging->cmdToBufferT<MicromeshSTriDescend>(cmd, splitParts.descends.buffer, splitParts.descends.info.offset,
+                                                  splitParts.descends.info.range);
 
   for(uint32_t subdivLevel = 4; subdivLevel <= 5; subdivLevel++)
   {
@@ -378,6 +308,31 @@ void MicromeshSubTriangleDecoderVK::uploadDescends(nvvk::StagingMemoryManager* s
       descendCur[partID] = partMicroInfo;
     }
   }
+}
+
+void initSplitPartsSubTri(ResourcesVK& res, MicromeshSplitPartsVk& splitParts)
+{
+  nvvk::StagingMemoryManager* staging = res.m_allocator.getStaging();
+  VkCommandBuffer             cmd     = res.cmdBuffer();
+
+  // common look-up tables independent of data
+  splitParts.descends =
+      res.createBuffer(sizeof(MicromeshSTriDescend) * MICRO_STRI_DESCENDS_COUNT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  splitParts.triangleIndices =
+      res.createBuffer(sizeof(uint32_t) * (MICRO_MESHLET_PRIMS * MICRO_MESHLET_TOPOS), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  // one set of vertices for each partID config, plus zeroed dummy to allow safe out of bounds access
+  splitParts.vertices = res.createBuffer(sizeof(MicromeshSTriVertex) * MICRO_STRI_VTX_COUNT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+  MicroSplitParts splits;
+
+  // setup indices
+  splits.uploadTriangleIndices(staging, cmd, splitParts.triangleIndices, false);
+
+  // setup vertices
+  uploadVertices(staging, cmd, splits, splitParts);
+
+  // setup descend info
+  uploadDescends(staging, cmd, splits, splitParts);
 }
 
 }  // namespace microdisp

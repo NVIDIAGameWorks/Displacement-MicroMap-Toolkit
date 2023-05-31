@@ -11,6 +11,42 @@
 #include <mesh_view_conv.hpp>
 #include <type_traits>
 
+// clang-format off
+constexpr const char* tinygltfTypeName(int type, int componentType)
+{
+  #define ROW(c) { "vec2_" c, "vec3_" c, "vec4_" c, "mat2_" c, "mat3_" c, "mat4_" c, "scalar_" c, "vector_" c, "matrix_" c }
+  constexpr const char* table[8][9] ={ ROW("i8"), ROW("ui8"), ROW("i16"), ROW("ui16"), ROW("i32"), ROW("ui32"), ROW("f32"), ROW("f64") };
+
+  int typeIndex = 0;
+  switch(type)
+  {
+    case TINYGLTF_TYPE_VEC2: typeIndex = 0; break;
+    case TINYGLTF_TYPE_VEC3: typeIndex = 1; break;
+    case TINYGLTF_TYPE_VEC4: typeIndex = 2; break;
+    case TINYGLTF_TYPE_MAT2: typeIndex = 3; break;
+    case TINYGLTF_TYPE_MAT3: typeIndex = 4; break;
+    case TINYGLTF_TYPE_MAT4: typeIndex = 5; break;
+    case TINYGLTF_TYPE_SCALAR: typeIndex = 6; break;
+    case TINYGLTF_TYPE_VECTOR: typeIndex = 7; break;
+    case TINYGLTF_TYPE_MATRIX: typeIndex = 8; break;
+    default: return "unknown";
+  }
+
+  switch(componentType)
+  {
+    case TINYGLTF_COMPONENT_TYPE_BYTE: return table[0][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: return table[1][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_SHORT: return table[2][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: return table[3][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_INT: return table[4][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: return table[5][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_FLOAT: return table[6][typeIndex];
+    case TINYGLTF_COMPONENT_TYPE_DOUBLE: return table[7][typeIndex];
+    default: return "unknown";
+  }
+}
+// clang-format on
+
 // Utility template to give type Dst with the same constness of type Src. It
 // could be used to return a const X when a function takes a const Y and
 // non-const X when taking a non-const Y without having to write two functions.
@@ -126,6 +162,7 @@ static bool copyConvertTinyGltfIntScalar(const tinygltf::Model& tmodel, int acce
 template <class T>
 static bool setTinyGltfArrayViewWithFallback(apply_const<T, tinygltf::Model>&                   model,
                                              int                                                accessorID,
+                                             const char*                                        accessorName,
                                              meshops::DynamicArrayView<std::remove_const_t<T>>& fallback,
                                              meshops::ArrayView<T>&                             result)
 {
@@ -146,23 +183,24 @@ static bool setTinyGltfArrayViewWithFallback(apply_const<T, tinygltf::Model>&   
     {
       if(copyConvertTinyGltfIntScalar(model, accessorID, fallback))
       {
-        LOGI("Converted attribute %i from gltf type (%i, %i) to (%i, %i).\n", accessorID, model.accessors[accessorID].type,
-             model.accessors[accessorID].componentType, AccessorInfo::type, AccessorInfo::componentType);
+        LOGI("Converted attribute %i %s from gltf %s to %s.\n", accessorID, accessorName,
+             tinygltfTypeName(model.accessors[accessorID].type, model.accessors[accessorID].componentType),
+             tinygltfTypeName<AccessorInfo>());
         result = fallback;
         return true;
       }
       else
       {
-        LOGE("Failed to convert attribute %i from gltf type (%i, %i) to (%i, %i).\n", accessorID,
-             model.accessors[accessorID].type, model.accessors[accessorID].componentType, AccessorInfo::type,
-             AccessorInfo::componentType);
+        LOGE("Failed to convert attribute %i %s from gltf type %s to %s.\n", accessorID, accessorName,
+             tinygltfTypeName(model.accessors[accessorID].type, model.accessors[accessorID].componentType),
+             tinygltfTypeName<AccessorInfo>());
       }
     }
     else
     {
-      LOGW("Warnings: discarding attribute %i with unsupported gltf type (%i, %i). Expected (%i, %i).\n", accessorID,
-           model.accessors[accessorID].type, model.accessors[accessorID].componentType, AccessorInfo::type,
-           AccessorInfo::componentType);
+      LOGW("Warnings: discarding attribute %i %s with unsupported gltf type %s. Expected %s.\n", accessorID,
+           accessorName, tinygltfTypeName(model.accessors[accessorID].type, model.accessors[accessorID].componentType),
+           tinygltfTypeName<AccessorInfo>());
     }
   }
   return false;
@@ -249,7 +287,7 @@ static std::conditional_t<std::is_const_v<TinygltfModel>, meshops::MeshView, mes
   meshops::ArrayView<apply_const<TinygltfModel, uint32_t>> meshIndices;
   meshops::DynamicArrayView<uint32_t>                      fallbackIndices(fallbackStorage.triangleVertices);
   // Ignore failures to load attributes - not all are required.
-  (void)setTinyGltfArrayViewWithFallback(model, tinygltfPrim.indices, fallbackIndices, meshIndices);
+  (void)setTinyGltfArrayViewWithFallback(model, tinygltfPrim.indices, "indices", fallbackIndices, meshIndices);
   result.triangleVertices = meshops::ArrayView<apply_const<TinygltfModel, nvmath::vec3ui>>(meshIndices);
 
   // Standard vertex attributes
@@ -257,33 +295,38 @@ static std::conditional_t<std::is_const_v<TinygltfModel>, meshops::MeshView, mes
     auto it = tinygltfPrim.attributes.find(attrName);
     return it != tinygltfPrim.attributes.end() ? it->second : -1;
   };
-  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("POSITION"), fallbackStorage.vertexPositions, result.vertexPositions);
-  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("NORMAL"), fallbackStorage.vertexNormals, result.vertexNormals);
-  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("TEXCOORD_0"), fallbackStorage.vertexTexcoords0, result.vertexTexcoords0);
-  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("TANGENT"), fallbackStorage.vertexTangents, result.vertexTangents);
+  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("POSITION"), "positions", fallbackStorage.vertexPositions,
+                                         result.vertexPositions);
+  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("NORMAL"), "normals", fallbackStorage.vertexNormals, result.vertexNormals);
+  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("TEXCOORD_0"), "texcoords0",
+                                         fallbackStorage.vertexTexcoords0, result.vertexTexcoords0);
+  (void)setTinyGltfArrayViewWithFallback(model, findGltfAttr("TANGENT"), "tangents", fallbackStorage.vertexTangents,
+                                         result.vertexTangents);
 
   // Apply attributes from NV_micromap_tooling extension, if it exists
   NV_micromap_tooling tooling;
   if(getPrimitiveMicromapTooling(tinygltfPrim, tooling))
   {
-    (void)setTinyGltfArrayViewWithFallback(model, tooling.directions, fallbackStorage.vertexDirections, result.vertexDirections);
-    (void)setTinyGltfArrayViewWithFallback(model, tooling.directionBounds, fallbackStorage.vertexDirectionBounds,
-                                           result.vertexDirectionBounds);
-    (void)setTinyGltfArrayViewWithFallback(model, tooling.subdivisionLevels, fallbackStorage.triangleSubdivisionLevels,
-                                           result.triangleSubdivisionLevels);
-    (void)setTinyGltfArrayViewWithFallback(model, tooling.primitiveFlags, fallbackStorage.trianglePrimitiveFlags,
-                                           result.trianglePrimitiveFlags);
+    (void)setTinyGltfArrayViewWithFallback(model, tooling.directions, "directions", fallbackStorage.vertexDirections,
+                                           result.vertexDirections);
+    (void)setTinyGltfArrayViewWithFallback(model, tooling.directionBounds, "directionBounds",
+                                           fallbackStorage.vertexDirectionBounds, result.vertexDirectionBounds);
+    (void)setTinyGltfArrayViewWithFallback(model, tooling.subdivisionLevels, "subdivLevels",
+                                           fallbackStorage.triangleSubdivisionLevels, result.triangleSubdivisionLevels);
+    (void)setTinyGltfArrayViewWithFallback(model, tooling.primitiveFlags, "primitiveFlags",
+                                           fallbackStorage.trianglePrimitiveFlags, result.trianglePrimitiveFlags);
   }
 
   // Apply attributes from NV_displacement_micromap extension, if it exists
   NV_displacement_micromap micromap;
   if(getPrimitiveDisplacementMicromap(tinygltfPrim, micromap))
   {
-    (void)setTinyGltfArrayViewWithFallback(model, micromap.directions, fallbackStorage.vertexDirections, result.vertexDirections);
-    (void)setTinyGltfArrayViewWithFallback(model, micromap.directionBounds, fallbackStorage.vertexDirectionBounds,
-                                           result.vertexDirectionBounds);
-    (void)setTinyGltfArrayViewWithFallback(model, micromap.primitiveFlags, fallbackStorage.trianglePrimitiveFlags,
-                                           result.trianglePrimitiveFlags);
+    (void)setTinyGltfArrayViewWithFallback(model, micromap.directions, "directions", fallbackStorage.vertexDirections,
+                                           result.vertexDirections);
+    (void)setTinyGltfArrayViewWithFallback(model, micromap.directionBounds, "directionBounds",
+                                           fallbackStorage.vertexDirectionBounds, result.vertexDirectionBounds);
+    (void)setTinyGltfArrayViewWithFallback(model, micromap.primitiveFlags, "primitiveFlags",
+                                           fallbackStorage.trianglePrimitiveFlags, result.trianglePrimitiveFlags);
   }
 
   // If the gltf file does not define these attributes, look in the bary file

@@ -5,6 +5,8 @@ set(PROJECT_NAME "meshops_bake")
 
 # Sources and headers for the library
 set(SOURCE_FILES
+    meshops_bake_batch.hpp
+    meshops_bake_batch.cpp
     meshops_bake_vk.hpp
     meshops_bake_vk.cpp
     meshops_bake.cpp

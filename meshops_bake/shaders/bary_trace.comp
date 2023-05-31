@@ -32,9 +32,9 @@
 layout(local_size_x = THREADS_PER_TRIANGLE) in;
 
 // Buffers
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos
+layout(buffer_reference, scalar) readonly buffer BakerMeshInfos
 {
-  PrimMeshInfo i[];
+  BakerMeshInfo i[];
 };
 layout(buffer_reference, scalar) readonly buffer Vertices
 {
@@ -79,7 +79,7 @@ layout(set = 0, binding = eDistances, scalar) uniform baryBuffer
 
 layout(push_constant) uniform PushContrive_
 {
-  PushHighLow pc;
+  BakerPushConstants pc;
 };
 
 #include "trace_utils.glsl"
@@ -107,31 +107,28 @@ shared uint s_dMax;
 //
 void main()
 {
-  // Retrieve the Primitive mesh buffer information
-  PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primLoInfoAddress);
-  PrimMeshInfo  pinfo  = pInfo_.i[pc.primMeshID];
-
-  uint primID   = pc.baryTraceBatchOffset + gl_WorkGroupID.x;
-  uint threadID = gl_LocalInvocationID.x;
-
-  uint            triID       = primID + pc.distOffset;
+  // Load the mesh buffer data
+  BakerMeshInfos  meshes      = BakerMeshInfos(sceneDesc.baseMeshAddress);
+  BakerMeshInfo   mesh        = meshes.i[0];
+  uint            triID       = pc.baryTraceBatchOffset + gl_WorkGroupID.x;
+  uint            threadID    = gl_LocalInvocationID.x;
   Triangles       triangle    = Triangles(sceneDesc.trianglesAddress);
   TriangleMinMaxs minMaxs     = TriangleMinMaxs(sceneDesc.triangleMinMaxsAddress);
-  uint            subdivLevel = min(triangle.t[triID].subdivLevel, MAX_SUBDIV_LEVELS - 1);
+  uint            subdivLevel = min(triangle.t[triID].subdivLevel, BAKER_MAX_SUBDIV_LEVEL);
   uint            valueFirst  = triangle.t[triID].valueFirst;
   uint            valueCount  = triangle.t[triID].valueCount;
 
   //------------------------------------------------------------
   // Sampling info
 
-  // Vextex and indices of the primitive
-  Vertices        vertices            = Vertices(pinfo.vertexAddress);
-  Indices         indices             = Indices(pinfo.indexAddress);
-  DirectionBounds directionBounds     = DirectionBounds(pinfo.vertexDirectionBoundsAddress);
-  DirectionBounds directionBoundsOrig = DirectionBounds(pinfo.vertexDirectionBoundsOrigAddress);
+  // Vextex and indices of the mesh
+  Vertices        vertices            = Vertices(mesh.vertexAddress);
+  Indices         indices             = Indices(mesh.indexAddress);
+  DirectionBounds directionBounds     = DirectionBounds(mesh.vertexDirectionBoundsAddress);
+  DirectionBounds directionBoundsOrig = DirectionBounds(mesh.vertexDirectionBoundsOrigAddress);
 
   // Getting the 3 indices of the triangle (local)
-  uvec3 triangleIndex = indices.i[primID];
+  uvec3 triangleIndex = indices.i[triID];
 
   // All vertex attributes of the triangle.
   Vertex v0 = decompressVertex(vertices.cv[triangleIndex.x]);
@@ -180,7 +177,7 @@ void main()
     // highres mesh. This can be avoided by moving the ray slightly towards the
     // middle of the triangle. This does so by scaling down the weights slightly
     // and re-balancing so they still sum to one.
-    const float edgeEpsilon = min(0.0005, 1.0 / float(1 << (MAX_SUBDIV_LEVELS + 3)));
+    const float edgeEpsilon = min(0.0005, 1.0 / float(1 << (BAKER_MAX_SUBDIV_LEVEL + 2)));
     barycentrics *= 1.0 - edgeEpsilon;
     barycentrics += (1.0 - barycentrics.x - barycentrics.y - barycentrics.z) / 3.0;
 
@@ -265,8 +262,7 @@ void main()
   barrier();
   if(threadID == 0)
   {
-    // TODO: compute min/maxs in a separate pass. the following will break when baking in batches
-    minMaxs.m[triID].x = decodeMinMaxFp32(s_dMin);
-    minMaxs.m[triID].y = decodeMinMaxFp32(s_dMax);
+    minMaxs.m[triID].x = min(minMaxs.m[triID].x, decodeMinMaxFp32(s_dMin));
+    minMaxs.m[triID].y = max(minMaxs.m[triID].y, decodeMinMaxFp32(s_dMax));
   }
 }

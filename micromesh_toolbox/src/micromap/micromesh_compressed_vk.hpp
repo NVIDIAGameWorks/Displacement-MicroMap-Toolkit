@@ -18,14 +18,21 @@ namespace microdisp {
 
 struct MicromeshCombinedData;
 
-struct MicromeshSetCompressedVK
+// Meshlet data common between micromesh instances.
+struct MicromeshSplitPartsVk
 {
-  // TODO: create these only once
-  RBuffer umajor2bmap;
-
   RBuffer vertices;
   RBuffer descends;
   RBuffer triangleIndices;
+
+  // init() with e.g. initSplitPartsSubTri()
+
+  void deinit(ResourcesVK& res);
+};
+
+struct MicromeshSetCompressedVK
+{
+  RBuffer umajor2bmap;
 
   struct MeshData
   {
@@ -63,6 +70,8 @@ struct MicromeshSetCompressedVK
     //RBuffer distances;
   };
 
+  MicromeshSplitPartsVk* splitParts;
+
   std::vector<MeshData> meshDatas;
 
   bool hasBaseTriangles = false;
@@ -81,7 +90,7 @@ struct MicromeshSetCompressedVK
 
   // updates the state of `MeshData::combinedData` to retrieve most buffer addresses and store them
   // in the binding buffer
-  void uploadMeshDatasBinding(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd);
+  void uploadMeshDatasBinding(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd, const MicromeshSplitPartsVk* splitParts);
 };
 
 }  // namespace microdisp

@@ -270,13 +270,13 @@ int main(int argc, char** argv)
 
     // Load the input scene
     auto                                       basePath = fs::path(inputFilename).parent_path();
-    std::unique_ptr<micromesh_tool::ToolScene> scene    = std::make_unique<micromesh_tool::ToolScene>();
+    std::unique_ptr<micromesh_tool::ToolScene> scene;
     if(!inputFilename.empty())
     {
-      if(scene->create(inputFilename) != micromesh::Result::eSuccess)
+      scene = micromesh_tool::ToolScene::create(inputFilename);
+      if(!scene)
       {
         LOGE("Error: Failed to load '%s'\n", inputFilename.c_str());
-        scene->destroy();
         return EXIT_FAILURE;
       }
       LOGI("Loaded %s (%s)\n", fs::path(inputFilename).filename().string().c_str(),
@@ -310,7 +310,6 @@ int main(int argc, char** argv)
         if(!tool_generate::toolGenerate(context, args, scene))
         {
           LOGE("micromesh_tool: generate failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -320,7 +319,6 @@ int main(int argc, char** argv)
         if(!tool_tessellate::toolPreTessellate(context, args, scene))
         {
           LOGE("micromesh_tool: pretessellate failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -344,15 +342,10 @@ int main(int argc, char** argv)
         if(!result)
         {
           LOGE("micromesh_tool: bake failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
 
-        if(bakerReference)
-        {
-          bakerReference->destroy();
-          bakerReference.reset();
-        }
+        bakerReference.reset();
       }
       else if(subcommand.first == "displacedtessellate")
       {
@@ -361,7 +354,6 @@ int main(int argc, char** argv)
         if(!tool_tessellate::toolDisplacedTessellate(context, args, scene))
         {
           LOGE("micromesh_tool: displacedtessellate failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -371,7 +363,6 @@ int main(int argc, char** argv)
         if(!tool_merge::toolMerge(args, scene))
         {
           LOGE("micromesh_tool: merge failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -393,8 +384,12 @@ int main(int argc, char** argv)
             if(nextBakeArgs.highFilename.empty())
             {
               LOGI("Copying the scene before running the remesher, to be used by the next baker stage\n");
-              bakerReference = std::make_unique<micromesh_tool::ToolScene>();
-              bakerReference->create(scene);
+              bakerReference = micromesh_tool::ToolScene::create(scene);
+              if(!bakerReference)
+              {
+                LOGE("Failed to duplicate scene before remeshing\n");
+                return EXIT_FAILURE;
+              }
             }
             break;
           }
@@ -404,7 +399,6 @@ int main(int argc, char** argv)
         if(!tool_remesh::toolRemesh(context, args, scene))
         {
           LOGE("micromesh_tool: remesh failure. Aborting.\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -418,7 +412,6 @@ int main(int argc, char** argv)
         if(!tool_optimize::toolOptimize(context, args, scene))
         {
           LOGE("micromesh_tool: optimize failure. Aborting\n");
-          scene->destroy();
           return EXIT_FAILURE;
         }
       }
@@ -439,8 +432,6 @@ int main(int argc, char** argv)
     }
 
     assert(!bakerReference);
-    scene->destroy();
-
     return EXIT_SUCCESS;
   }
   catch(const std::exception& e)

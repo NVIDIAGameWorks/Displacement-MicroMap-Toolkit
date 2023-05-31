@@ -278,7 +278,9 @@ float getCurvature(uint index, vec3 pos, vec3 normal, vec2 texCoord)
     createCoordinateSystem(normal, x, y);
     float avgAbove = 0.f, avgBelow = 0.f;
     uint  counterAbove = 0, counterBelow = 0;
-    uint  seed = xxhash32(uvec3(index, 1, 1));
+    // Pick a seed that is only dependent on the vertex location, ensuring all duplicate vertices
+    // sample the same set of directions
+    uint seed = xxhash32(uvec3(floatBitsToUint(pos.x), floatBitsToUint(pos.y), floatBitsToUint(pos.z)));
     for(uint i = 0; i < CURVATURE_SAMPLES; i++)
     {
       //vec3 dir = getDirection(i, x, y, normal);

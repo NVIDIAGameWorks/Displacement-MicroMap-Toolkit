@@ -16,6 +16,8 @@
 
 namespace ImGuiH {
 
+static std::string s_lastErrorMessage;
+static bool        s_openErrorPopup = false;
 
 void PushButtonColor(ImGuiHCol c, float s /*= 1.0F*/, float v /*= 1.0F*/)
 {
@@ -89,5 +91,35 @@ bool LoadFileButtons(GLFWwindow* glfwin, std::string& result, const char* title,
   return button_pressed;
 }
 
+void ErrorMessageShow(const char* message)
+{
+  s_lastErrorMessage = message;
+  s_openErrorPopup   = true;
+}
+
+void ErrorMessageRender()
+{
+  if(s_openErrorPopup)
+  {
+    s_openErrorPopup = false;
+    ImGui::OpenPopup("Error");
+  }
+
+  // Always center this window when appearing
+  ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+  ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+  if(ImGui::BeginPopupModal("Error", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+  {
+    ImGui::Text("%s", s_lastErrorMessage.c_str());
+    ImGui::Separator();
+    if(ImGui::Button("OK", ImVec2(120, 0)))
+    {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::EndPopup();
+  }
+}
 
 }  // namespace ImGuiH

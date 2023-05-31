@@ -36,24 +36,17 @@ public:
   // Create a ToolBary from a file on disk. The filename is split into base and
   // relative so that the relative portion can be reused when saving the file
   // for a different scene in a new location.
-  [[nodiscard]] micromesh::Result create(const fs::path& basePath, const fs::path& relativePath);
+  [[nodiscard]] static std::unique_ptr<ToolBary> create(const fs::path& basePath, const fs::path& relativePath);
 
   // Create a ToolBary from in-memory BaryContents, taking ownership. The
   // relative portion of the filename is optional. If given, it will be used
-  // when saving the scene.
-  [[nodiscard]] micromesh::Result create(std::vector<baryutils::BaryContentData>&& baryContents, const fs::path& relativePath);
+  // when saving the scene. An empty relativePath indicates one should be
+  // generated when saving.
+  [[nodiscard]] static std::unique_ptr<ToolBary> create(std::vector<baryutils::BaryContentData>&& baryContents,
+                                                        const fs::path&                           relativePath = {});
 
   // Copy constructor. Used to deep copy a scene.
-  [[nodiscard]] micromesh::Result create(const ToolBary& other);
-
-  void destroy();
-
-  ~ToolBary()
-  {
-    assert(!valid());  // call destroy()
-  }
-
-  [[nodiscard]] bool valid() const { return m_baryFile || !m_baryContents.empty(); }
+  [[nodiscard]] static std::unique_ptr<ToolBary> create(const ToolBary& other);
 
   // Saves the bary data to disk. The filename is split into base and relative
   // so that the scene can reference the saved location with

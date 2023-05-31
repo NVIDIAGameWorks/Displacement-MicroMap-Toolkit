@@ -10,12 +10,14 @@
  * its affiliates is strictly prohibited.
  */
 
+#pragma once
 
 #include "nvh/commandlineparser.hpp"
 #include "nvh/timesampler.hpp"
 #include "nvp/nvpsystem.hpp"
 #include "nvvk/error_vk.hpp"
 #include "nvvkhl/application.hpp"
+#include "toolbox_viewer.hpp"
 
 
 //--------------------------------------------------------------------------------------------------
@@ -34,19 +36,26 @@ class ElementTesting : public nvvkhl::IAppElement
   {
     bool        enabled{false};
     bool        snapshot{false};
+    bool        defaultRtx{false};
     uint32_t    maxFrames{5};
     std::string snapshotPath;
   } m_settings;
 
 public:
-  ElementTesting(int argc, char** argv)
+  ElementTesting(int argc, char** argv, ViewerSettings& viewerSettings)
   {
     nvh::CommandLineParser cmd_parser("");
     cmd_parser.addArgument({"--test"}, &m_settings.enabled, "Enable testing");
     cmd_parser.addArgument({"--snapshot"}, &m_settings.snapshot, "Take and save a snapshot");
     cmd_parser.addArgument({"--frames"}, &m_settings.maxFrames, "Max number of frames");
     cmd_parser.addArgument({"--shapshot-path"}, &m_settings.snapshotPath, "Snapshot image filename (optional)");
+    cmd_parser.addArgument({"--rtx"}, &m_settings.defaultRtx, "Default to rendering with RTX");
     cmd_parser.parse(argc, argv);
+
+    if(m_settings.enabled)
+    {
+      viewerSettings.renderSystem = m_settings.defaultRtx ? ViewerSettings::ePathtracer : ViewerSettings::eRaster;
+    }
   };
   ~ElementTesting() = default;
 

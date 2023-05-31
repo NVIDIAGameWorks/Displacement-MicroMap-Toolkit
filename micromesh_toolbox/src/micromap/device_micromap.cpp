@@ -28,14 +28,15 @@ static_assert(offsetof(VkMicromapTriangleEXT, subdivisionLevel) == offsetof(bary
 static_assert(offsetof(VkMicromapTriangleEXT, format) == offsetof(bary::Triangle, blockFormat),
               "format mismatch VkMicromapTriangleEXT and bary::Triangle");
 
-void DeviceMicromap::init(meshops::Context         meshopsContext,
-                          nvvk::ResourceAllocator& alloc,
-                          VkQueue                  queue,
-                          uint32_t                 queueFamily,
-                          VkCommandBuffer          cmd,
-                          uint64_t                 usageFlags,
-                          const bary::ContentView& bary,
-                          uint8_t*                 decimateEdgeFlags)
+void DeviceMicromap::init(meshops::Context                        meshopsContext,
+                          nvvk::ResourceAllocator&                alloc,
+                          VkQueue                                 queue,
+                          uint32_t                                queueFamily,
+                          VkCommandBuffer                         cmd,
+                          uint64_t                                usageFlags,
+                          const microdisp::MicromeshSplitPartsVk& splitParts,
+                          const bary::ContentView&                bary,
+                          const uint8_t*                          decimateEdgeFlags)
 {
   m_device                     = alloc.getDevice();
   const bary::BasicView& basic = bary.basic;
@@ -162,7 +163,7 @@ void DeviceMicromap::init(meshops::Context         meshopsContext,
   if(usageFlags & eDeviceMicromeshUsageRasterizingBit)
   {
     m_raster.emplace();
-    microdisp::MicromeshSubTriangleDecoderVK decoder(m_raster->micromeshSet);
+    microdisp::MicromeshSubTriangleDecoderVK decoder(splitParts, m_raster->micromeshSet);
     microdisp::ResourcesVK                   res(alloc, cmd);
     uint32_t numThreads = micromesh::micromeshOpContextGetConfig(meshopsContext->m_micromeshContext).threadCount;
     decoder.init(res, bary, decimateEdgeFlags, bary.basic.groups[0].maxSubdivLevel, true, false, numThreads);
@@ -188,18 +189,20 @@ void DeviceMicromap::deinit(nvvk::ResourceAllocator& alloc)
   alloc.destroy(m_baryValues);
 }
 
-void DeviceBary::addMicromap(meshops::Context                meshopsContext,
-                             nvvk::ResourceAllocator&        alloc,
-                             VkQueue                         queue,
-                             uint32_t                        queueFamily,
-                             VkCommandBuffer                 cmd,
-                             uint64_t                        usageFlags,
-                             const bary::ContentView&        bary,
-                             const micromesh_tool::ToolMesh& mesh)
+void DeviceBary::addMicromap(meshops::Context                        meshopsContext,
+                             nvvk::ResourceAllocator&                alloc,
+                             VkQueue                                 queue,
+                             uint32_t                                queueFamily,
+                             VkCommandBuffer                         cmd,
+                             uint64_t                                usageFlags,
+                             const microdisp::MicromeshSplitPartsVk& splitParts,
+                             const bary::ContentView&                bary,
+                             const micromesh_tool::ToolMesh&         mesh)
 {
+  const uint8_t* decimatedEdgeFlags =
+      mesh.view().trianglePrimitiveFlags.empty() ? nullptr : mesh.view().trianglePrimitiveFlags.data();
   m_micromaps.emplace_back();
-  m_micromaps.back().init(meshopsContext, alloc, queue, queueFamily, cmd, usageFlags, bary,
-                          mesh.view().trianglePrimitiveFlags.data());
+  m_micromaps.back().init(meshopsContext, alloc, queue, queueFamily, cmd, usageFlags, splitParts, bary, decimatedEdgeFlags);
 }
 
 void DeviceBary::addEmpty()

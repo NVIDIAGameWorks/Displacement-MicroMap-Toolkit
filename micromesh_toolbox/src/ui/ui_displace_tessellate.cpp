@@ -15,8 +15,6 @@
 
 void uiDisplaceTessalate(tool_tessellate::ToolDisplacedTessellateArgs& args, GLFWwindow* glfWin)
 {
-  static const char* ImageFilter = "Images|*.jpg;*.png;*.tga;*.bmp;*.psd;*.gif;*.hdr;*.pic;*;pnm;*.exr";
-
   static const std::array<const char*, 3> reduce_names = {"Linear", "Normalized Linear", "Tangent"};
 
   using PE = ImGuiH::PropertyEditor;
@@ -40,11 +38,16 @@ void uiDisplaceTessalate(tool_tessellate::ToolDisplacedTessellateArgs& args, GLF
   // #TODO: This one seems unused
   //  PE::entry("Heightmaps", [&] { return ImGui::Checkbox("##heightmaps", &args.heightmaps); });
   PE::entry("Tessellation Bias", [&] { return ImGui::InputInt("##TessBias", (int*)&args.heightmapTessBias); });
-  PE::entry("Generate Directions", [&] { return ImGui::Checkbox("##DirectionsGen", &args.heightmapDirectionsGen); });
+  PE::entry(
+      "Generate Directions", [&] { return ImGui::Checkbox("##DirectionsGen", &args.heightmapDirectionsGen); },
+      "Computes smooth heightmap displacement direction vectors. Mesh normals are used otherwise.");
   ImGui::BeginDisabled(!args.heightmapDirectionsGen);
-  PE::entry("Direction Type", [&] {
+  PE::entry("Direction Generation Method", [&] {
     return ImGui::Combo("##Op", (int*)&args.heightmapDirectionsOp, reduce_names.data(), static_cast<int>(reduce_names.size()));
   });
+  ImGuiH::tooltip(
+      "Linear = angle-weighted average of adjacent face normals; Normalized Linear = average + normalize to unit "
+      "length; Tangent = preserve sharp edges");
   ImGui::EndDisabled();
   PE::entry("Bias", [&] { return ImGui::SliderFloat("##heightmapBias", &args.heightmapBias, 0.0F, 1.0F); });
   PE::entry("Scale", [&] { return ImGui::SliderFloat("##heightmapScale", &args.heightmapScale, 0.0F, 1.0F); });

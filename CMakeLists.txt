@@ -3,13 +3,18 @@ cmake_minimum_required(VERSION 3.13 FATAL_ERROR)
 cmake_policy(SET CMP0079 NEW) # Allow linking with targets in other directories
 project(
     micromesh_toolkit
-    VERSION 1.0
+    VERSION 1.1
     DESCRIPTION "Micromesh Tools"
     LANGUAGES C CXX)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/_install" CACHE PATH "folder in which INSTALL will put everything needed to run the binaries" FORCE)
+
+# Set the default for enabling beta extensions before nvpro_core. Beta
+# extensions can conflict if the Vulkan SDK and nvpro_core generated
+# nvvk/extensions_vk.hpp versions are different.
+option(VK_ENABLE_BETA_EXTENSIONS "Enable beta extensions provided by the Vulkan SDK" OFF)
 
 # Enable bounds and other error checking for gcc debug builds in std::vector
 set_directory_properties(PROPERTIES COMPILE_DEFINITIONS $<$<CONFIG:Debug>:_GLIBCXX_DEBUG>)
@@ -37,6 +42,17 @@ set(NVPRO_CORE_DIR ${BASE_DIRECTORY}/nvpro_core)
 if(MSVC)
     add_definitions(/wd26812)  # 'enum class' over 'enum'
     add_definitions(/wd26451)  # Arithmetic overflow, casting 4 byte value to 8 byte value
+else()
+  # Ignore warnings from some third party libraries by including them with -isystem
+  include_directories(SYSTEM
+    external/nvpro_core/
+    external/nvpro_core/imgui/
+    external/nvpro_core/third_party/stb/
+    external/nvpro_core/third_party/imgui/
+    external/nvpro_core/third_party/vma/include/
+    external/nvpro_core/third_party/tinygltf/
+    micromesh_toolbox/thirdparty/aftermath_sdk/include/
+    )
 endif()
 
 #--------------------------------------------------------------------------------------------------
@@ -48,6 +64,9 @@ _add_package_ZLIB()
 _add_package_VulkanSDK()
 _add_package_ShaderC()
 _add_package_ImGUI()
+if(WIN32)
+	_add_package_DirectX12()
+endif()
 _add_nvpro_core_lib()
 
 _add_package_Glm()
@@ -77,7 +96,6 @@ endfunction()
 
 find_first(PATH_BARY_CORE Displacement-MicroMap-BaryFile
   ${CMAKE_CURRENT_SOURCE_DIR}/external/Displacement-MicroMap-BaryFile
-  ${CMAKE_CURRENT_SOURCE_DIR}/external/bary_core
   ${CMAKE_CURRENT_SOURCE_DIR}/../bary_core
   ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/bary_core
   )
@@ -85,7 +103,6 @@ add_subdirectory(${PATH_BARY_CORE} ${CMAKE_BINARY_DIR}/bary_core)
 
 find_first(PATH_MICROMESH_CORE Displacement-MicroMap-SDK/micromesh_core
   ${CMAKE_CURRENT_SOURCE_DIR}/external/Displacement-MicroMap-SDK/micromesh_core
-  ${CMAKE_CURRENT_SOURCE_DIR}/external/micromesh_core
   ${CMAKE_CURRENT_SOURCE_DIR}/../micromesh_core
   ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/micromesh_core
   )
@@ -93,7 +110,6 @@ add_subdirectory(${PATH_MICROMESH_CORE} ${CMAKE_BINARY_DIR}/micromesh_core)
 
 find_first(PATH_SDK_COMPRESSION Displacement-MicroMap-SDK/micromesh_displacement_compression
   ${CMAKE_CURRENT_SOURCE_DIR}/external/Displacement-MicroMap-SDK/micromesh_displacement_compression
-  ${CMAKE_CURRENT_SOURCE_DIR}/external/micromesh_displacement_compression
   ${CMAKE_CURRENT_SOURCE_DIR}/../micromesh_displacement_compression
   ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/micromesh_displacement_compression
   )
@@ -101,7 +117,6 @@ add_subdirectory(${PATH_SDK_COMPRESSION} ${CMAKE_BINARY_DIR}/micromesh_displacem
 
 find_first(PATH_SDK_REMESHING Displacement-MicroMap-SDK/micromesh_displacement_remeshing
   ${CMAKE_CURRENT_SOURCE_DIR}/external/Displacement-MicroMap-SDK/micromesh_displacement_remeshing
-  ${CMAKE_CURRENT_SOURCE_DIR}/external/micromesh_displacement_remeshing
   ${CMAKE_CURRENT_SOURCE_DIR}/../micromesh_displacement_remeshing
   ${CMAKE_CURRENT_SOURCE_DIR}/../sdk/micromesh_displacement_remeshing
   )
@@ -141,8 +156,11 @@ if(WIN32) # Windows
     )
 else() # Linux
   set(MICROMESH_COMPILE_WARNINGS
-    -Wsign-compare
-    -Wconversion
+    -Werror
+    -Werror=sign-compare
+    -Werror=conversion
+    -Werror=format
+    -Werror=unused
     )
 endif()
 

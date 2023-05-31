@@ -269,7 +269,6 @@ bool RemeshingOperator_c::destroy(Context context)
 
 bool RemeshingOperator_c::beginRemeshTask(Context context)
 {
-  auto                                ctx = getContext(context);
   std::vector<gpu::ResourceAllocInfo> scratchTaskResources(m_remesherSetupInfo.scratchTaskCount);
   m_output.scratchTaskCount  = m_remesherSetupInfo.scratchTaskCount;
   m_output.scratchTaskAllocs = scratchTaskResources.data();
@@ -284,6 +283,7 @@ bool RemeshingOperator_c::beginRemeshTask(Context context)
 
   // prepare task specific scratch resources
   m_taskData.scratchTaskResources.resize(m_output.scratchTaskCount);
+  assert(m_remesherSetupInfo.scratchTaskCount == m_output.scratchTaskCount);
   for(uint32_t i = 0; i < m_remesherSetupInfo.scratchTaskCount; i++)
   {
     // allocate
@@ -396,7 +396,7 @@ bool RemeshingOperator_c::beginRemeshTask(Context context)
 
       break;
       case gpu::CommandType::eGlobalConstants: {
-        const auto* globalConstant = reinterpret_cast<const gpu::CmdGlobalConstants*>(cmdData);
+        //const auto* globalConstant = reinterpret_cast<const gpu::CmdGlobalConstants*>(cmdData);
         // FIXME : to implement, how? - Not needed by current remesher anyway
       }
       break;
@@ -407,9 +407,6 @@ bool RemeshingOperator_c::beginRemeshTask(Context context)
       }
       break;
       case gpu::CommandType::eBarrier: {
-        const auto* barrier = reinterpret_cast<const gpu::CmdBarrier*>(cmdData);
-
-
         // FIXME: take into account all combinations
         //if (barrier->readBits & gpu::BarrierBits::eBarrierBufferBit)
         {
@@ -457,6 +454,7 @@ bool RemeshingOperator_c::endRemeshTask(Context context)
 
   TEST_SUCCESS(gpu::micromeshGpuRemeshingEndTask(m_remesher, m_task, &m_output));
 
+  assert(static_cast<size_t>(m_remesherSetupInfo.scratchTaskCount) == m_taskData.scratchTaskResources.size());
   for(uint32_t i = 0; i < m_remesherSetupInfo.scratchTaskCount; i++)
   {
     context->m_vk->m_resourceAllocator.destroy(m_taskData.scratchTaskResources[i]);
@@ -702,8 +700,6 @@ micromesh::Result RemeshingOperator_c::remesh(Context               context,
   m_preservedAttributes = input.preservedVertexAttributeFlags;
   auto ctx              = getContext(context);
   createRemesherResources(context, input, modified, modifiedMesh);
-  uint32_t remeshingOriginalTriangleCount = m_input.meshTriangleCount;
-  uint32_t remeshingCurrentTriangleCount  = ~0u;
   bool     done                           = false;
   bool     first                          = true;
 
@@ -796,6 +792,7 @@ micromesh::Result RemeshingOperator_c::remesh(Context               context,
     else
     {
       LOGE("Failed to remesh\n");
+      endRemeshTask(context);  // free resources
       return result;
     }
     cmdPool.submitAndWait(cmd);

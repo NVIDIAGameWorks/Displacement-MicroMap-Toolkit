@@ -144,11 +144,11 @@ public:
 
     PyHeightMap heightmap;
 
-    std::string normalMapFilepath;
-    int normalMapResolution;
+    std::string quaternionMapFilepath;
+    int quaternionMapResolution;
 
-    std::string uvRemapFilepath;
-    int uvRemapResolution;
+    std::string offsetMapFilepath;
+    int offsetMapResolution;
 
     PyBakerSettings settings;
 };

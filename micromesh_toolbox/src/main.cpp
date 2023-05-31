@@ -372,30 +372,19 @@ int main(int argc, char** argv)
   app->addElement(toolbox_viewer);                                             // Our sample
   app->addElement(std::make_unique<nvvkhl::ElementLogger>(&g_logger, false));  // Add logger window
   app->addElement(std::make_unique<nvvkhl::ElementNvml>(false));               // Add logger window
-  app->addElement(std::make_unique<ElementTesting>(argc, argv));               // --test
+  app->addElement(std::make_unique<ElementTesting>(argc, argv, toolbox_viewer->settings()));  // --test
 
   // Loading HDR and scene; default or command line
   toolbox_viewer->onFileDrop(in_hdr.c_str());
-  ActivityStatus& status = toolbox_viewer->settings().activtyStatus;
-  while(status.isBusy())
-  {  // Making sure the HDR is loaded before loading the scene
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    status.updateState();
-  }
+  toolbox_viewer->waitForLoad();
   toolbox_viewer->onFileDrop(in_filename.c_str());
-  if(testing)
-  {
-    while(status.isBusy())
-    {  // Making sure the scene is loaded before running the application
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      status.updateState();
-    }
-  }
+  toolbox_viewer->waitForLoad();
 
   // Start Application: which will loop and call on"Functions" for all Elements
   app->run();
 
   // Cleanup
+  vkDeviceWaitIdle(app->getContext()->m_device);
   toolbox_viewer.reset();
   app.reset();
 

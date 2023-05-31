@@ -15,8 +15,6 @@
 
 void uiPretesselator(tool_tessellate::ToolPreTessellateArgs& args, ViewerSettings::GlobalToolSettings& toolSettings, GLFWwindow* glfWin)
 {
-  static const char* ImageFilter = "Images|*.jpg;*.png;*.tga;*.bmp;*.psd;*.gif;*.hdr;*.pic;*;pnm;*.exr";
-
   if(ImGui::SmallButton("Reset##Pretess"))
     args = {};
   ImGuiH::tooltip("Reset values to default");

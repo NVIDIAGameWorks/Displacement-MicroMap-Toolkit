@@ -106,11 +106,11 @@ vec2 computeTraceRange(float wDirLen, float minT, float maxT)
   // Conservatively adds max heightmap displacement to the max trace distance
   if(pc.highMeshHasDisplacement != 0)
   {
-    PrimMeshInfos highPInfo_ = PrimMeshInfos(sceneDesc.primHiInfoAddress);
-    // Index 0 as we are only tracing against at one mesh at a time!
-    PrimMeshInfo highPInfo = highPInfo_.i[0];
-    minT -= highPInfo.maxDisplacementWs / wDirLen;
-    maxT += highPInfo.maxDisplacementWs / wDirLen;
+    BakerMeshInfos referenceInfos = BakerMeshInfos(sceneDesc.referenceMeshAddress);
+    // Index 0 as we are only tracing against one mesh at a time!
+    BakerMeshInfo referenceInfo = referenceInfos.i[0];
+    minT -= referenceInfo.maxDisplacementWs / wDirLen;
+    maxT += referenceInfo.maxDisplacementWs / wDirLen;
   }
 
   return vec2(minT, maxT);
@@ -153,10 +153,10 @@ bool traceRay(in rayQueryEXT rayQuery, vec3 origin, vec3 direction, uint flags, 
       vec2 baryCoord2  = rayQueryGetIntersectionBarycentricsEXT(rayQuery, false);
       vec3 baryCoord3  = vec3(1.0 - baryCoord2.x - baryCoord2.y, baryCoord2);
 
-      PrimMeshInfos pInfo_ = PrimMeshInfos(sceneDesc.primHiInfoAddress);
+      BakerMeshInfos pInfo_ = BakerMeshInfos(sceneDesc.referenceMeshAddress);
 
       // Only tracing against at one mesh at a time!
-      PrimMeshInfo pinfo = pInfo_.i[0];
+      BakerMeshInfo pinfo = pInfo_.i[0];
 
       Indices  indices  = Indices(pinfo.indexAddress);
       Vertices vertices = Vertices(pinfo.vertexAddress);

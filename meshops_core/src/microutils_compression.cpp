@@ -284,7 +284,7 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
     // we leave this one empty, as is because
     // we are not interested in the instanced histogram, but pure data histogram
     // (also our application use 1:1 mapping)
-    histoInput.meshTriangleMappings;
+    histoInput.meshTriangleMappings = {};
 
     // reserve worst-case histogram bins
     std::vector<micromesh::BlockFormatUsage> blockFormatUsages(micromesh::micromeshGetBlockFormatUsageReserveCount(&compressedMap));
@@ -439,9 +439,17 @@ static micromesh::Result decodeBlockInto(const uint8_t*                         
   micromesh::Result result             = micromesh::micromeshLayoutInitStandard(&settings.decompressedLayout,
                                                                     microutils::getMicromeshLayoutType(blockLevel.layout));
   assert(result == micromesh::Result::eSuccess);
+  if(result != micromesh::Result::eSuccess)
+  {
+    return result;
+  }
 
   result = micromesh::micromeshDecompressDisplacementBlock(&settings, scratchDataSize, scratchData, blockValues, blockDecoded, nullptr);
   assert(result == micromesh::Result::eSuccess);
+  if(result != micromesh::Result::eSuccess)
+  {
+    return result;
+  }
 
   // write values into uncompressed data
   for(uint32_t v = 0; v < uint32_t(blockLevel.coordinates.size()); v++)
@@ -510,8 +518,9 @@ uint16_t* ThreadedTriangleDecoder::tempThreadDecode(uint32_t               threa
     const uint8_t* blockValues = basicCompressed.values + size_t(baryGroup.valueFirst)
                                  + (baryTri.valuesOffset + splitConfig.tris[i].blockByteOffset);
 
-    micromesh::Result result = decodeBlockInto(blockValues, baryTri.blockFormatDispC1, &splitConfig.tris[i], blockLevel,
-                                               triLevel, blockDecoded, triUncompressed, scratchDataSize, scratchData);
+    [[maybe_unused]] micromesh::Result result =
+        decodeBlockInto(blockValues, baryTri.blockFormatDispC1, &splitConfig.tris[i], blockLevel, triLevel,
+                        blockDecoded, triUncompressed, scratchDataSize, scratchData);
     assert(result == micromesh::Result::eSuccess);
   }
 
@@ -576,7 +585,6 @@ micromesh::Result baryMiscDataSetupMips(baryutils::BaryMiscData&       mip,
   {
     const bary::Group& baryGroup      = basicCompressed.groups[g];
     uint8_t*           mipGroupValues = (mip.uncompressedMips.data() + (mip.groupUncompressedMips[g].mipFirst));
-    const uint8_t* blockGroupValues = basicCompressed.values + (baryGroup.valueFirst * basicCompressed.valuesInfo->valueByteSize);
 
     struct Payload
     {
@@ -645,7 +653,6 @@ micromesh::Result baryBasicDataCompressedUpdateTriangleMinMaxs(baryutils::BaryBa
   for(uint32_t g = 0; g < basicCompressed.groupsCount; g++)
   {
     const bary::Group& baryGroup = basicCompressed.groups[g];
-    const uint8_t* blockGroupValues = basicCompressed.values + (baryGroup.valueFirst * basicCompressed.valuesInfo->valueByteSize);
 
     struct Payload
     {

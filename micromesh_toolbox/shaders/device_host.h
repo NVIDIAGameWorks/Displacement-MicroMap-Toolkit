@@ -21,13 +21,14 @@ struct PushConstant
   int  baryInfoID;       // For micromesh
   int  microMax;         // For micromesh raster, different for basetri/subtri
   vec2 microScaleBias;   // For micromesh raster
+  int  triangleCount;    // Valid for heightmaps only
   int  bakeSubdivLevel;  // ToolBox-global target subdivision level for baking
 };
 
 
 #define MAX_NB_LIGHTS 1
 #define WORKGROUP_SIZE 16
-#define HEIGHTMAP_MAX_SUBDIV_LEVEL 6
+#define HEIGHTMAP_MAX_SUBDIV_LEVEL 11
 
 // clang-format off
 #ifdef __cplusplus // Descriptor binding helper for C++ and GLSL
@@ -83,6 +84,7 @@ struct FrameInfo
   mat4  viewInv;               // Inverse of the model view
   Light light[MAX_NB_LIGHTS];  // Support for multiple lights
   vec4  envColor;              // Environment color multiplier
+  vec2  resolution;            // Size of the framebuffer in pixels
   int   useSky;                // Using sky of the HDR
   int   nbLights;              // Number of light used
   float envRotation;           // Rotation of the environment (around Y)
@@ -93,6 +95,9 @@ struct FrameInfo
   int   overlayColor;          // Color RGBA8 of the wireframe overlay
   vec2  mouseCoord;            // Mouse coordinate when pressing down, else (-1,-1)
   float vectorLength;          // Visualization of normal and direction vectors
+  int   heightmapSubdivLevel;  // Max. mesh shader heightmap tessellation
+  float heightmapScale;        // Additional UI-exposed heightmap scale
+  float heightmapOffset;       // Additional UI-exposed heightmap offset
 };
 
 

@@ -43,6 +43,7 @@ struct ToolRemeshArgs
   bool     ignoreTangents{false};
   bool     ignoreDisplacementDirections{false};
   bool     disableMicromeshData{false};
+  uint32_t remeshMinTriangles{0};  // Only remesh meshes with at least this many triangles
 };
 
 bool toolRemeshParse(int argc, char** argv, ToolRemeshArgs& args, std::ostream& os = std::cerr);

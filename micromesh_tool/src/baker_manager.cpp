@@ -27,6 +27,7 @@
 
 #include "imageio/imageio.hpp"
 #include <nvh/parallel_work.hpp>
+#include <unordered_set>
 
 #include "_autogen/pullpush.comp.h"
 #include "tool_image.hpp"
@@ -58,7 +59,8 @@ enum class GltfTextureField : uint32_t
   eTransmission,
   eAnisotropy,
   eVolumeThickness,
-  eAllFieldsEnd
+  eAllFieldsEnd,
+  eInvalid
 };
 
 GltfTextureField& operator++(GltfTextureField& v)
@@ -125,6 +127,92 @@ int getTextureField(const nvh::GltfMaterial& mat, GltfTextureField fieldIndex)
       return mat.volume.thicknessTexture;
   }
   return -1;
+}
+
+const char* getTextureFieldName(GltfTextureField fieldIndex)
+{
+  switch(fieldIndex)
+  {
+    case GltfTextureField::eNormal:
+      return "normal";
+    case GltfTextureField::eClearcoatNormal:
+      return "clearcoatNormal";
+    case GltfTextureField::eEmissive:
+      return "emissive";
+    case GltfTextureField::eOcclusion:
+      return "occlusion";
+    case GltfTextureField::ePBRBaseColor:
+      return "color";
+    case GltfTextureField::ePBRMetallicRoughness:
+      return "metallicRoughness";
+    case GltfTextureField::eSpecularGlossinessDiffuse:
+      return "diffuse";
+    case GltfTextureField::eSpecularGlossinessSpecularGlossiness:
+      return "specularGlossiness";
+    case GltfTextureField::eSpecularTexture:
+      return "specular";
+    case GltfTextureField::eSpecularColorTexture:
+      return "specularColor";
+    case GltfTextureField::eClearcoat:
+      return "clearcoat";
+    case GltfTextureField::eClearcoatRoughness:
+      return "clearcoatRoughness";
+    case GltfTextureField::eTransmission:
+      return "transmission";
+    case GltfTextureField::eAnisotropy:
+      return "anisotropy";
+    case GltfTextureField::eVolumeThickness:
+      return "thickness";
+  }
+  return "unknown";
+}
+
+static std::string getResampledTextureFilename(const BakerManagerConfig& info, const fs::path& source, size_t outputTextureIndex)
+{
+  assert(!source.empty());
+  fs::path newFilename = source.stem().string() + "_resampled" + source.extension().string();
+  return (source.parent_path() / newFilename).string();
+}
+
+struct NewImageSource
+{
+  const tinygltf::Material* material = nullptr;
+  GltfTextureField          field    = GltfTextureField::eInvalid;
+};
+
+// Replace spaces and characters that are often illegal in filenames with
+// underscores.
+static std::string sanitizeFilename(std::string filename)
+{
+  static const std::unordered_set<char> illegalChars = {'/', '<', '>', ':', '"', '\\', '|', '?', '*'};
+  for(auto& c : filename)
+  {
+    // Non-printable characters, space and illegal characters.
+    if(c < ' ' || c == ' ' || illegalChars.count(c))
+    {
+      c = '_';
+    }
+  }
+  return filename;
+}
+
+static std::string getNewTextureFilename(const BakerManagerConfig& info, const NewImageSource& source, size_t outputTextureIndex)
+{
+  // Use the explicitly given output stem if it exists (typically from
+  // micromesh_tool CLI). Else, generate one based on the material name.
+  std::string stem = info.outTextureStem;
+  if(stem.empty() && source.material != nullptr)
+  {
+    stem = sanitizeFilename(source.material->name);
+  }
+
+  // Add the texture field to the stem, e.g. "color", if it exists
+  if(source.field != GltfTextureField::eInvalid)
+  {
+    stem = stem + (stem.empty() ? "" : "_") + getTextureFieldName(source.field);
+  }
+
+  return stem + "_resampled_new_" + std::to_string(outputTextureIndex) + ".png";
 }
 
 void setTextureFieldBase(tinygltf::Material&       tinygltfMaterial,
@@ -368,6 +456,9 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
   // Record textures that are to be resampled into each output image so it can be sized to the maximum
   std::map<int, std::vector<int>> loImageSources;
 
+  // Record sources for generating new filenames
+  std::unordered_map<int, NewImageSource> newImageSources;
+
   for(size_t meshIdx = 0; meshIdx < lowMesh->meshes().size(); meshIdx++)
   {
     const std::unique_ptr<micromesh_tool::ToolMesh>& loMesh        = lowMesh->meshes()[meshIdx];
@@ -466,6 +557,7 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
         lowMesh->textures().push_back(newTexture);
 
         setTextureField(loMatTG, loMat, field, loResTextureIdx, hiMatTG);
+        newImageSources[loResImageIdx] = {&hiMatTG, field};
       }
       else
       {
@@ -499,15 +591,6 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
         instructions[meshIdx].instructions.push_back(instruction);
       }
     }
-  }
-
-  // Rename lo-resolution textures we're writing that aren't new
-  for(int loTexIdx : loImagesToReplace)
-  {
-    micromesh_tool::ToolImage& image       = *lowMesh->images()[loTexIdx];
-    fs::path                   path        = image.relativePath();
-    fs::path                   newFilename = path.stem().string() + "_resampled" + path.extension().string();
-    image.relativePath()                   = path.parent_path() / newFilename;
   }
 
   // Prepare input storage
@@ -544,7 +627,16 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
     }
 
     GPUTextureContainer& result = m_resamplingOutputStorage[loImgIdx];
-    result.filePath             = getNewTextureURI(info, loImgIdx);
+    if(loImagesToReplace.find(loImgIdx) != loImagesToReplace.end())
+    {
+      // Rename lo-resolution textures we're writing that aren't new
+      micromesh_tool::ToolImage& image = *lowMesh->images()[loImgIdx];
+      result.filePath                  = getResampledTextureFilename(info, image.relativePath(), loImgIdx);
+    }
+    else
+    {
+      result.filePath = getNewTextureFilename(info, newImageSources[loImgIdx], loImgIdx);
+    }
     result.info.extent.width    = size.x;
     result.info.extent.height   = size.y;
     result.info.mipLevels       = nvvk::mipLevels(result.info.extent);
@@ -595,7 +687,16 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
     GPUTextureContainer& outTex = m_resamplingOutputStorage.emplace_back(GPUTextureContainer{});
     if(extraTexture.outURI.empty())
     {
-      outTex.filePath = getNewTextureURI(info, m_resamplingOutputStorage.size());
+      if(extraTexture.inURI.empty())
+      {
+        outTex.filePath = getNewTextureFilename(info, {}, m_resamplingOutputStorage.size() - 1);
+      }
+      else
+      {
+        fs::path path        = extraTexture.inURI;
+        fs::path newFilename = path.stem().string() + "_resampled" + path.extension().string();
+        outTex.filePath = getResampledTextureFilename(info, extraTexture.inURI, m_resamplingOutputStorage.size() - 1);
+      }
     }
     else
     {
@@ -897,7 +998,6 @@ bool BakerManager::prepareTexturesForMesh(nvvk::Context::Queue queueGCT, nvvk::C
   // to minimize staging memory usage.
   // We use a FIFO caching policy -- we have the information to implement
   // Belady's optimal algorithm, but this requires less code.
-  bool                         loadWithMinimalMemory = false;
   std::vector<GPUTextureIndex> texturesToDiskCache;
   {
     auto it = m_textureCacheFIFO.begin();
@@ -920,7 +1020,6 @@ bool BakerManager::prepareTexturesForMesh(nvvk::Context::Queue queueGCT, nvvk::C
         ++it;
       }
     }
-    loadWithMinimalMemory = (it == m_textureCacheFIFO.end());
   }
 
   if(!cacheResamplingTexturesToDisk(queueT, texturesToDiskCache))
@@ -1038,35 +1137,33 @@ void BakerManager::finishTexturesForMesh(nvvk::Context::Queue queueGCT, const Re
                  || tex.info.format == VK_FORMAT_R16G16B16A16_UNORM);
           const size_t         mip0SizeBytes = tex.mipSizeInBytes(0);
 
-          // Create the ToolScene image to copy the data to. Aux images are
-          // alwaus new and are simply appended to the scene to be saved in the
-          // same location as the gltf. All other images have been resampled so
-          // we need to replace existing images.
-          micromesh_tool::ToolImage* toolImage;
-          bool                       isAuxImage = static_cast<size_t>(textureIndex.idx) >= m_lowMesh->images().size();
-          if(isAuxImage)
-          {
-            toolImage = &m_lowMesh->createAuxImage();
-          }
-          else
-          {
-            // Replace the ToolImage
-            assert(textureIndex.idx < m_lowMesh->images().size());
-            auto newImage = std::make_unique<micromesh_tool::ToolImage>();
-            toolImage     = newImage.get();
-            m_lowMesh->setImage(textureIndex.idx, std::move(newImage));
-          }
-
-          // Initialize the ToolImage with the data. A low point for RAII fans.
+          // Initialize the ToolImage with the data.
           micromesh_tool::ToolImage::Info toolImageInfo;
           toolImageInfo.width             = tex.info.extent.width;
           toolImageInfo.height            = tex.info.extent.height;
           toolImageInfo.components        = tex.bytesPerPixel() / tex.bytesPerComponent();
           toolImageInfo.componentBitDepth = tex.bytesPerComponent() * 8;
-          if(toolImage->create(toolImageInfo, tex.filePath) == micromesh::Result::eSuccess)
+          auto toolImage                  = micromesh_tool::ToolImage::create(toolImageInfo, tex.filePath);
+          if(toolImage)
           {
             assert(toolImage->info().totalBytes() == mip0SizeBytes);
             memcpy(toolImage->raw(), dataMapped, mip0SizeBytes);
+
+            // Insert the image into the scene. Aux images are alwaus new and
+            // are simply appended to the scene to be saved in the same location
+            // as the gltf. All other images have been resampled so we need to
+            // replace existing images.
+            bool isAuxImage = static_cast<size_t>(textureIndex.idx) >= m_lowMesh->images().size();
+            if(isAuxImage)
+            {
+              m_lowMesh->appendAuxImage(std::move(toolImage));
+            }
+            else
+            {
+              // Replace the ToolImage
+              assert(textureIndex.idx < m_lowMesh->images().size());
+              m_lowMesh->setImage(textureIndex.idx, std::move(toolImage));
+            }
           }
           else
           {
@@ -1216,8 +1313,6 @@ bool BakerManager::loadResamplingTextures(nvvk::Context::Queue queueGCT, const s
         {
           // We should only be loading images from disk for the hi-res mesh.
           assert(textureIndex.vec == GPUTextureIndex::VectorIndex::eInput);
-
-          size_t w = 0, h = 0, comp = 0;
           assert(textureIndex.idx < m_highMesh->images().size());
           const micromesh_tool::ToolImage& toolImage = *m_highMesh->images()[textureIndex.idx];
           if(toolImage.info().components == requiredComponents)
@@ -1330,11 +1425,6 @@ bool BakerManager::loadResamplingTextures(nvvk::Context::Queue queueGCT, const s
   m_alloc->finalizeAndReleaseStaging();
 
   return allThreadsOk.load();
-}
-
-std::string BakerManager::getNewTextureURI(const BakerManagerConfig& info, size_t outputTextureIndex) const
-{
-  return info.outTextureStem + "_resampled_new_" + std::to_string(outputTextureIndex) + ".png";
 }
 
 std::string BakerManager::getCacheFilename(GPUTextureIndex textureIndex) const

@@ -48,7 +48,7 @@ void main()
   HitState          hit;  // Interpolated Hit from vertex shader
   vec3              toEye;
 
-  rasterLoad(IN.bary, gltfMat, pinfo, triInfo, hit, toEye);
+  rasterLoad(IN.pos, IN.bary, gl_PrimitiveID, gltfMat, pinfo, triInfo, hit, toEye);
 
   float NdotL = dot(hit.nrm, toEye);
 
@@ -69,7 +69,7 @@ void main()
   }
   else if(CONST_SHADE_MODE == eRenderShading_subdivLevel)
   {
-    vec3 color = subdDecFlagsToColor(shadeModeValue, triInfo.primitiveFlags, IN.bary);
+    vec3 color = subdDecFlagsToColor(shadeModeValue, MAX_BASE_SUBDIV, triInfo.primitiveFlags, IN.bary);
     outColor   = simpleShade(color, NdotL);
   }
   else if(CONST_SHADE_MODE == eRenderShading_minMax)
@@ -89,6 +89,6 @@ void main()
     hit.pos    = IN.pos;
     hit.geonrm = normalize(-cross(dFdx(IN.pos), dFdy(IN.pos)));
 
-    outColor = rasterShade(IN.bary, gltfMat, pinfo, triInfo, hit, toEye);
+    outColor = rasterShade(IN.bary, gltfMat, pinfo, triInfo, hit, toEye, gl_PrimitiveID);
   }
 }

@@ -42,6 +42,9 @@ enum class SceneNodeMicromesh
   eMicromeshWith,
   eMicromeshWithout,
   eMicromeshDontCare,
+  eHeightmapNoMicromesh,
+  eNoHeightmapNoMicromesh,
+  eNoHeightmapBothMicromesh,
 };
 
 
@@ -56,7 +59,7 @@ public:
   ~ToolboxScene();
 
   // Create the scene from a filename
-  void createFromFile(const std::string& filename);
+  [[nodiscard]] bool createFromFile(const std::string& filename);
   void destroy();
 
   // Resource creations
@@ -70,10 +73,10 @@ public:
 
 
   // Information getters
-  bool                                                 valid() const { return m_toolscene && m_toolscene->valid(); }
+  bool                                                 valid() const { return static_cast<bool>(m_toolscene); }
   const std::filesystem::path&                         getPathName() const { return m_pathFilename; }
   meshops::Context                                     getContext() { return m_context; }
-  bool                                                 hasBary() const { return !m_toolscene->barys().empty(); }
+  bool hasBary() const { return m_toolscene && !m_toolscene->barys().empty(); }
   const std::optional<micromesh_tool::ToolSceneStats>& stats() const { return m_sceneStats; }
 
   // Pipeline getters
@@ -130,6 +133,13 @@ private:
   VkCommandPool        m_cmdPool          = {VK_NULL_HANDLE};
   meshops::Context     m_context          = nullptr;
 
+  enum ShadeNodeBits
+  {
+    eNodeIsOpaque     = 0,
+    eNodeHasMicromap  = 1,
+    eNodeHasHeightmap = 2,
+  };
+
   std::unique_ptr<nvvk::SBTWrapper>                    m_sbt;            // Shading binding table wrapper
   std::unique_ptr<nvvk::DescriptorSetContainer>        m_rtxSet;         // Descriptor set
   std::unique_ptr<nvvk::DescriptorSetContainer>        m_sceneSet;       // Descriptor set
@@ -141,7 +151,7 @@ private:
   std::filesystem::path                                m_pathFilename;   // On load: scene path
   std::optional<micromesh_tool::ToolSceneStats>        m_sceneStats;     // On load: summary of scene data
   std::bitset<SceneDirtyFlags::eNumFlags>              m_dirty;          // Dirty flags
-  std::vector<std::bitset<2>>                          m_shadeNodes;     // Nodes with shading info: blend/µMesh
+  std::vector<std::bitset<3>>                          m_shadeNodes;     // Per-instance ShadeNodeBits flags
   nvvkhl::PipelineContainer                            m_rasterPipe;     // Pipeline for raster
   nvvkhl::PipelineContainer                            m_rtxPipe;        // Pipeline for RTX
 };

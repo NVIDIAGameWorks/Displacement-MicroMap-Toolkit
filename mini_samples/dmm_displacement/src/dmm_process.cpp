@@ -68,8 +68,6 @@ bool MicromapProcess::createMicromapData(VkCommandBuffer cmd, const nvh::Primiti
   // Get an array of displacement per triangle
   MicroDistances micro_dist = createDisplacements(mesh, subdivLevel, terrain);
 
-  const auto num_tri = static_cast<uint32_t>(micro_dist.rawTriangles.size());
-
   {
     // Compress all the data using SDK functions
 
@@ -302,9 +300,9 @@ MicromapProcess::MicromapData MicromapProcess::prepareData(const nvh::PrimitiveM
   micromesh::micromeshLayoutInitStandard(&layout, micromesh::StandardLayoutType::eUmajor);
 
   // The compression library needs information about the topology of the mesh.
-  micromesh::ScopedOpContext ctx{};
-  micromesh::Result          result{};
-  meshops::MeshTopologyData  topodata{};
+  micromesh::ScopedOpContext         ctx{};
+  [[maybe_unused]] micromesh::Result result{};
+  meshops::MeshTopologyData          topodata{};
   result = topodata.buildFindingWatertightIndices(ctx, mesh.indices.size(), mesh.indices.data(), mesh.vertices.size(),
                                                   reinterpret_cast<const micromesh::Vector_float_3*>(&mesh.vertices[0].p),
                                                   sizeof(nvh::PrimitiveVertex));
@@ -318,7 +316,6 @@ MicromapProcess::MicromapData MicromapProcess::prepareData(const nvh::PrimitiveM
   std::vector<uint16_t> data16;
   std::vector<uint16_t> triangle_subdiv_levels;
   std::vector<uint32_t> triangle_value_index_offsets;
-  uint32_t              index_offset = 0;
   for(const auto& triangle : inputValues.rawTriangles)
   {
     auto offset = static_cast<uint32_t>(data16.size());

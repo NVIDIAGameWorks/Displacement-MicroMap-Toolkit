@@ -58,6 +58,24 @@ int makeAccessor(tinygltf::Model&    model,
                  std::vector<double> minValues,
                  std::vector<double> maxValues)
 {
+  bool validBounds = true;
+  for(auto& x : minValues)
+  {
+    if(std::isnan(x) || std::isinf(x))
+      validBounds = false;
+  }
+  for(auto& x : maxValues)
+  {
+    if(std::isnan(x) || std::isinf(x))
+      validBounds = false;
+  }
+  if(!validBounds)
+  {
+    minValues = std::vector<double>(minValues.size(), -1.0);
+    maxValues = std::vector<double>(minValues.size(), 1.0);
+    LOGW("Warning: invalid min/max bounds when writing gltf accessor\n");
+  }
+
   int accessorID = static_cast<int>(model.accessors.size());
   {
     tinygltf::Accessor accessor;
@@ -73,14 +91,13 @@ int makeAccessor(tinygltf::Model&    model,
   return accessorID;
 }
 
-void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& meshSetView, bool writeDisplacementMicromapExt)
+tinygltf::Primitive tinygltfAppendPrimitive(tinygltf::Model& model, const meshops::MeshView& meshView, bool writeDisplacementMicromapExt)
 {
-  assert(!meshSetView.flat.triangleVertices.empty());
-  assert(!meshSetView.slices.empty());
-  bool                     addsMicromapExt{false};
-  const char*              extName = writeDisplacementMicromapExt ? NV_DISPLACEMENT_MICROMAP : NV_MICROMAP_TOOLING;
-  const meshops::MeshView& flat    = meshSetView.flat;
-  meshops::ConstArrayView<uint32_t> indices(flat.triangleVertices);
+  assert(meshView.triangleCount());
+  assert(meshView.vertexCount());
+  bool        addsMicromapExt{false};
+  const char* extName = writeDisplacementMicromapExt ? NV_DISPLACEMENT_MICROMAP : NV_MICROMAP_TOOLING;
+  meshops::ConstArrayView<uint32_t> indices(meshView.triangleVertices);
 
   // Data is added to the last existing buffer. Create one if it doesn't exist.
   if(model.buffers.empty())
@@ -101,12 +118,12 @@ void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& m
 
   // Put all per-vertex attributes in the same buffer
   size_t vertexAttribBufferOffset;
-  size_t vertexAttribBufferSize = flat.vertexPositions.size() * sizeof(*flat.vertexPositions.data())
-                                  + flat.vertexNormals.size() * sizeof(*flat.vertexNormals.data())
-                                  + flat.vertexTexcoords0.size() * sizeof(*flat.vertexTexcoords0.data())
-                                  + flat.vertexTangents.size() * sizeof(*flat.vertexTangents.data())
-                                  + flat.vertexDirections.size() * sizeof(*flat.vertexDirections.data())
-                                  + flat.vertexDirectionBounds.size() * sizeof(*flat.vertexDirectionBounds.data());
+  size_t vertexAttribBufferSize = meshView.vertexPositions.size() * sizeof(*meshView.vertexPositions.data())
+                                  + meshView.vertexNormals.size() * sizeof(*meshView.vertexNormals.data())
+                                  + meshView.vertexTexcoords0.size() * sizeof(*meshView.vertexTexcoords0.data())
+                                  + meshView.vertexTangents.size() * sizeof(*meshView.vertexTangents.data())
+                                  + meshView.vertexDirections.size() * sizeof(*meshView.vertexDirections.data())
+                                  + meshView.vertexDirectionBounds.size() * sizeof(*meshView.vertexDirectionBounds.data());
   size_t     vertexAttribOffsetPositions;
   size_t     vertexAttribOffsetNormals;
   size_t     vertexAttribOffsetTexcoords0;
@@ -114,9 +131,10 @@ void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& m
   size_t     vertexAttribOffsetDirections;
   size_t     vertexAttribOffsetDirectionBounds;
   size_t     vertexAttribStride{};
-  const bool primitiveFlagsExist = !flat.trianglePrimitiveFlags.empty();
+  const bool primitiveFlagsExist = !meshView.trianglePrimitiveFlags.empty();
   size_t     primitiveFlagsBufferOffset;
-  const bool subdivisionLevelsExist = (!flat.triangleSubdivisionLevels.empty()) && (strcmp(extName, NV_MICROMAP_TOOLING) == 0);
+  const bool subdivisionLevelsExist =
+      (!meshView.triangleSubdivisionLevels.empty()) && (strcmp(extName, NV_MICROMAP_TOOLING) == 0);
   size_t subdivisionLevelsBufferOffset;
   size_t indicesOffset;
   size_t indicesSize = indices.size() * sizeof(*indices.data());
@@ -125,50 +143,50 @@ void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& m
     vertexAttribBufferOffset    = buffer.data.size();
     vertexAttribOffsetPositions = 0;
     vertexAttribOffsetNormals =
-        vertexAttribOffsetPositions + (flat.vertexPositions.empty() ? 0 : sizeof(*flat.vertexPositions.data()));
+        vertexAttribOffsetPositions + (meshView.vertexPositions.empty() ? 0 : sizeof(*meshView.vertexPositions.data()));
     vertexAttribOffsetTexcoords0 =
-        vertexAttribOffsetNormals + (flat.vertexNormals.empty() ? 0 : sizeof(*flat.vertexNormals.data()));
+        vertexAttribOffsetNormals + (meshView.vertexNormals.empty() ? 0 : sizeof(*meshView.vertexNormals.data()));
     vertexAttribOffsetTangents =
-        vertexAttribOffsetTexcoords0 + (flat.vertexTexcoords0.empty() ? 0 : sizeof(*flat.vertexTexcoords0.data()));
+        vertexAttribOffsetTexcoords0 + (meshView.vertexTexcoords0.empty() ? 0 : sizeof(*meshView.vertexTexcoords0.data()));
     // Skip bitangents. In glTF, they are stored using the .w component of the
     // tangent.
     vertexAttribOffsetDirections =
-        vertexAttribOffsetTangents + (flat.vertexTangents.empty() ? 0 : sizeof(*flat.vertexTangents.data()));
+        vertexAttribOffsetTangents + (meshView.vertexTangents.empty() ? 0 : sizeof(*meshView.vertexTangents.data()));
     vertexAttribOffsetDirectionBounds =
-        vertexAttribOffsetDirections + (flat.vertexDirections.empty() ? 0 : sizeof(*flat.vertexDirections.data()));
+        vertexAttribOffsetDirections + (meshView.vertexDirections.empty() ? 0 : sizeof(*meshView.vertexDirections.data()));
     vertexAttribStride = vertexAttribOffsetDirectionBounds
-                         + (flat.vertexDirectionBounds.empty() ? 0 : sizeof(*flat.vertexDirectionBounds.data()));
-    assert(vertexAttribStride * flat.vertexCount() == vertexAttribBufferSize);
+                         + (meshView.vertexDirectionBounds.empty() ? 0 : sizeof(*meshView.vertexDirectionBounds.data()));
+    assert(vertexAttribStride * meshView.vertexCount() == vertexAttribBufferSize);
 
     // Write vertex attribs
-    for(size_t i = 0; i < flat.vertexCount(); ++i)
+    for(size_t i = 0; i < meshView.vertexCount(); ++i)
     {
-      if(!flat.vertexPositions.empty())
-        appendRawElement(buffer.data, flat.vertexPositions[i]);
-      if(!flat.vertexNormals.empty())
-        appendRawElement(buffer.data, flat.vertexNormals[i]);
-      if(!flat.vertexTexcoords0.empty())
-        appendRawElement(buffer.data, flat.vertexTexcoords0[i]);
-      if(!flat.vertexTangents.empty())
-        appendRawElement(buffer.data, flat.vertexTangents[i]);
-      if(!flat.vertexDirections.empty())
-        appendRawElement(buffer.data, flat.vertexDirections[i]);
-      if(!flat.vertexDirectionBounds.empty())
-        appendRawElement(buffer.data, flat.vertexDirectionBounds[i]);
+      if(!meshView.vertexPositions.empty())
+        appendRawElement(buffer.data, meshView.vertexPositions[i]);
+      if(!meshView.vertexNormals.empty())
+        appendRawElement(buffer.data, meshView.vertexNormals[i]);
+      if(!meshView.vertexTexcoords0.empty())
+        appendRawElement(buffer.data, meshView.vertexTexcoords0[i]);
+      if(!meshView.vertexTangents.empty())
+        appendRawElement(buffer.data, meshView.vertexTangents[i]);
+      if(!meshView.vertexDirections.empty())
+        appendRawElement(buffer.data, meshView.vertexDirections[i]);
+      if(!meshView.vertexDirectionBounds.empty())
+        appendRawElement(buffer.data, meshView.vertexDirectionBounds[i]);
     }
 
     // Primitive flags
     if(primitiveFlagsExist)
     {
       primitiveFlagsBufferOffset = buffer.data.size();
-      appendRawData(buffer.data, flat.trianglePrimitiveFlags);
+      appendRawData(buffer.data, meshView.trianglePrimitiveFlags);
     }
 
     // Subdivision levels
     if(subdivisionLevelsExist)
     {
       subdivisionLevelsBufferOffset = buffer.data.size();
-      appendRawData(buffer.data, flat.triangleSubdivisionLevels);
+      appendRawData(buffer.data, meshView.triangleSubdivisionLevels);
     }
 
     auto indicesBegin = appendRawData(buffer.data, indices);
@@ -183,76 +201,67 @@ void appendToTinygltfModel(tinygltf::Model& model, const meshops::MeshSetView& m
   // Primitive flags data and layout
   const int primitiveFlagsBufferViewID =
       primitiveFlagsExist ? makeView(model, bufferID, primitiveFlagsBufferOffset,
-                                     flat.trianglePrimitiveFlags.size() * sizeof(uint8_t), sizeof(uint8_t)) :
+                                     meshView.trianglePrimitiveFlags.size() * sizeof(uint8_t), sizeof(uint8_t)) :
                             -1;
 
   // Subdivision levels data and layout
   const int subdivisionLevelsBufferViewID =
       subdivisionLevelsExist ? makeView(model, bufferID, subdivisionLevelsBufferOffset,
-                                        flat.triangleSubdivisionLevels.size() * sizeof(uint16_t), sizeof(uint16_t)) :
+                                        meshView.triangleSubdivisionLevels.size() * sizeof(uint16_t), sizeof(uint16_t)) :
                                -1;
 
   // Indices layout
   int indicesBufferViewID = makeView(model, bufferID, indicesOffset, indicesSize, 0, TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER);
   assert(indicesOffset + indicesSize <= model.buffers.back().data.size());
 
-  for(auto& slice : meshSetView.slices)
+  tinygltf::Primitive primitive;
+  primitive.mode = TINYGLTF_MODE_TRIANGLES;
+
+  // Triangle indices
+  primitive.indices = makeAccessor(model, indices, indicesBufferViewID, 0, 0, meshView.triangleCount() * 3);
+
+  // Standard gltf vertex attributes
+  primitive.attributes["POSITION"] = makeAccessor(model, meshView.vertexPositions, verticesBufferViewID,
+                                                  vertexAttribOffsetPositions, 0, meshView.vertexCount());
+  if(!meshView.vertexNormals.empty())
+    primitive.attributes["NORMAL"] = makeAccessor(model, meshView.vertexNormals, verticesBufferViewID,
+                                                  vertexAttribOffsetNormals, 0, meshView.vertexCount());
+  if(!meshView.vertexTexcoords0.empty())
+    primitive.attributes["TEXCOORD_0"] = makeAccessor(model, meshView.vertexTexcoords0, verticesBufferViewID,
+                                                      vertexAttribOffsetTexcoords0, 0, meshView.vertexCount());
+  if(!meshView.vertexTangents.empty())
+    primitive.attributes["TANGENT"] = makeAccessor(model, meshView.vertexTangents, verticesBufferViewID,
+                                                   vertexAttribOffsetTangents, 0, meshView.vertexCount());
+
+  // Extension attributes
+  tinygltf::Value::Object ext;
+  if(!meshView.vertexDirections.empty())
+    ext.emplace("directions", makeAccessor(model, meshView.vertexDirections, verticesBufferViewID,
+                                           vertexAttribOffsetDirections, 0, meshView.vertexCount()));
+  if(!meshView.vertexDirectionBounds.empty())
+    ext.emplace("directionBounds", makeAccessor(model, meshView.vertexDirectionBounds, verticesBufferViewID,
+                                                vertexAttribOffsetDirectionBounds, 0, meshView.vertexCount()));
+
+  if(primitiveFlagsExist)
+    ext.emplace("primitiveFlags", makeAccessor(model, meshView.trianglePrimitiveFlags, primitiveFlagsBufferViewID, 0, 0,
+                                               meshView.triangleCount()));
+
+  if(subdivisionLevelsExist)
+    ext.emplace("subdivisionLevels", makeAccessor(model, meshView.triangleSubdivisionLevels,
+                                                  subdivisionLevelsBufferViewID, 0, 0, meshView.triangleCount()));
+
+  if(!ext.empty())
   {
-    tinygltf::Primitive primitive;
-    primitive.mode = TINYGLTF_MODE_TRIANGLES;
-
-    // Triangle indices
-    primitive.indices = makeAccessor(model, indices, indicesBufferViewID, 0, slice.triangleOffset * 3, slice.triangleCount * 3);
-
-    // Standard gltf vertex attributes
-    primitive.attributes["POSITION"] = makeAccessor(model, flat.vertexPositions, verticesBufferViewID,
-                                                    vertexAttribOffsetPositions, slice.vertexOffset, slice.vertexCount);
-    if(!flat.vertexNormals.empty())
-      primitive.attributes["NORMAL"] = makeAccessor(model, flat.vertexNormals, verticesBufferViewID,
-                                                    vertexAttribOffsetNormals, slice.vertexOffset, slice.vertexCount);
-    if(!flat.vertexTexcoords0.empty())
-      primitive.attributes["TEXCOORD_0"] = makeAccessor(model, flat.vertexTexcoords0, verticesBufferViewID,
-                                                        vertexAttribOffsetTexcoords0, slice.vertexOffset, slice.vertexCount);
-    if(!flat.vertexTangents.empty())
-      primitive.attributes["TANGENT"] = makeAccessor(model, flat.vertexTangents, verticesBufferViewID,
-                                                     vertexAttribOffsetTangents, slice.vertexOffset, slice.vertexCount);
-
-    // Extension attributes
-    tinygltf::Value::Object ext;
-    if(!flat.vertexDirections.empty())
-      ext.emplace("directions", makeAccessor(model, flat.vertexDirections, verticesBufferViewID,
-                                             vertexAttribOffsetDirections, slice.vertexOffset, slice.vertexCount));
-    if(!flat.vertexDirectionBounds.empty())
-      ext.emplace("directionBounds", makeAccessor(model, flat.vertexDirectionBounds, verticesBufferViewID,
-                                                  vertexAttribOffsetDirectionBounds, slice.vertexOffset, slice.vertexCount));
-
-    if(primitiveFlagsExist)
-      ext.emplace("primitiveFlags", makeAccessor(model, flat.trianglePrimitiveFlags, primitiveFlagsBufferViewID, 0,
-                                                 slice.triangleOffset, slice.triangleCount));
-
-    if(subdivisionLevelsExist)
-      ext.emplace("subdivisionLevels", makeAccessor(model, flat.triangleSubdivisionLevels, subdivisionLevelsBufferViewID,
-                                                    0, slice.triangleOffset, slice.triangleCount));
-
-    if(!ext.empty())
-    {
-      addsMicromapExt               = true;
-      primitive.extensions[extName] = std::move(tinygltf::Value(ext));
-    }
-
-    // Create a mesh for each primitive
-    int meshID = static_cast<int>(model.meshes.size());
-    {
-      tinygltf::Mesh mesh;
-      mesh.primitives.push_back(std::move(primitive));
-      model.meshes.push_back(std::move(mesh));
-    }
+    addsMicromapExt               = true;
+    primitive.extensions[extName] = std::move(tinygltf::Value(ext));
   }
 
   if(addsMicromapExt)
   {
     setExtensionUsed(model.extensionsUsed, extName, true);
   }
+
+  return primitive;
 }
 
 bool copyTinygltfModelExtra(const tinygltf::Model& src, tinygltf::Model& dst, std::set<std::string> extensionFilter)
@@ -288,10 +297,20 @@ bool copyTinygltfModelExtra(const tinygltf::Model& src, tinygltf::Model& dst, st
   copyObjects(src.scenes, dst.scenes);
   copyObjects(src.lights, dst.lights);
   copyExtensions(src.extensions, dst.extensions);
-  std::copy_if(src.extensionsUsed.begin(), src.extensionsUsed.end(), std::back_inserter(dst.extensionsUsed),
+
+  // Keep extensionsUsed in the destination, in case appendToTinygltfModel()
+  // added some. Use a std::set to avoid duplicates when merging.
+  std::set<std::string> extensionsUsed(dst.extensionsUsed.begin(), dst.extensionsUsed.end());
+  std::copy_if(src.extensionsUsed.begin(), src.extensionsUsed.end(), std::inserter(extensionsUsed, extensionsUsed.begin()),
                [&](auto extName) { return extensionFilter.count(extName) == 0; });
-  std::copy_if(src.extensionsRequired.begin(), src.extensionsRequired.end(), std::back_inserter(dst.extensionsRequired),
+  dst.extensionsUsed = {extensionsUsed.begin(), extensionsUsed.end()};
+
+  // Same for extensionsRequired
+  std::set<std::string> extensionsRequired(dst.extensionsRequired.begin(), dst.extensionsRequired.end());
+  std::copy_if(src.extensionsRequired.begin(), src.extensionsRequired.end(),
+               std::inserter(extensionsRequired, extensionsRequired.begin()),
                [&](auto extName) { return extensionFilter.count(extName) == 0; });
+  dst.extensionsRequired = {extensionsRequired.begin(), extensionsRequired.end()};
 
   // Copy embedded images
   for(auto& image : dst.images)

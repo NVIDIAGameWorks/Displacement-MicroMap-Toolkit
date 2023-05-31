@@ -106,8 +106,14 @@ public:
     void operator()(imageio::ImageIOData ptr) { imageio::freeData(&ptr); }
   };
 
+  // TODO: remove. Only needed by ToolScene::createImage().
+  [[nodiscard]] static std::unique_ptr<ToolImage> createInvalid()
+  {
+    return std::unique_ptr<ToolImage>(new ToolImage());
+  }
+
   // Create a ToolTexture with source data on disk
-  [[nodiscard]] micromesh::Result create(const fs::path& basePath, const fs::path& relativePath)
+  [[nodiscard]] static std::unique_ptr<ToolImage> create(const fs::path& basePath, const fs::path& relativePath)
   {
     // Do not use the empty path for the current working directory. When
     // m_basePath is not empty, we may need to copy the texture to the new
@@ -115,79 +121,88 @@ public:
     assert(basePath.is_absolute());
     if(!basePath.is_absolute())
     {
-      return micromesh::Result::eFailure;
+      return {};
     }
 
-    m_basePath                     = basePath;
-    m_relativePath                 = relativePath;
-    fs::path filename              = m_basePath / m_relativePath;
-    if(!imageio::info(filename.string().c_str(), &m_info.width, &m_info.height, &m_info.components))
+    auto result            = std::unique_ptr<ToolImage>(new ToolImage());
+    result->m_basePath     = basePath;
+    result->m_relativePath = relativePath;
+    fs::path filename      = result->m_basePath / result->m_relativePath;
+    if(!imageio::info(filename.string().c_str(), &result->m_info.width, &result->m_info.height, &result->m_info.components))
     {
       LOGE("Error: failed to read %s\n", filename.string().c_str());
-      return micromesh::Result::eFailure;
+      // Return the result. We won't be able to render or resample it, but it
+      // may be able to be copied to the new directory when saved.
+      return result;
     }
 
     // The resampler currently always expects 4-component images
     // TODO: support more image formats
-    if(m_info.components == 3)
+    if(result->m_info.components == 3)
     {
-      LOGI("Image %s will be converted from rgb to rgba\n", m_relativePath.string().c_str());
+      LOGI("Image %s will be converted from rgb to rgba\n", result->m_relativePath.string().c_str());
       // This will be passed to imageio::loadGeneral()'s required_components
-      m_info.components = 4;
+      result->m_info.components = 4;
     }
 
-    m_info.componentBitDepth = imageio::is16Bit(filename.string().c_str()) ? 16 : 8;
-    return micromesh::Result::eSuccess;
+    result->m_info.componentBitDepth = imageio::is16Bit(filename.string().c_str()) ? 16 : 8;
+    return result;
   }
 
   // Create a ToolTexture and allocate source data.
-  [[nodiscard]] micromesh::Result create(const Info& info, const fs::path& relativePath)
+  [[nodiscard]] static std::unique_ptr<ToolImage> create(const Info& info, const fs::path& relativePath)
   {
-    assert(!relativePath.empty());  // Embedding images not supported yet
-    if(!info.valid())
+    if(relativePath.empty())
     {
-      return micromesh::Result::eFailure;
+      LOGE("Error: Creating embedded images is not supported yet\n");
+      assert(false);
+      return {};
     }
-    m_relativePath = relativePath;
-    m_rawData      = std::unique_ptr<void, ImageioDeleter>(imageio::allocateData(info.totalBytes()), ImageioDeleter());
-    m_info         = info;
-    return micromesh::Result::eSuccess;
+    auto result            = std::unique_ptr<ToolImage>(new ToolImage());
+    result->m_relativePath = relativePath;
+    result->m_rawData = std::unique_ptr<void, ImageioDeleter>(imageio::allocateData(info.totalBytes()), ImageioDeleter());
+    // Note: info may not be valid if copying from a source ToolImage that could not be read
+    result->m_info = info;
+    return result;
   }
 
   // Create a ToolTexture, taking ownership of the provided raw data.
-  [[nodiscard]] micromesh::Result create(const Info& info, const fs::path& relativePath, imageio::ImageIOData rawData)
+  [[nodiscard]] static std::unique_ptr<ToolImage> create(const Info& info, const fs::path& relativePath, imageio::ImageIOData rawData)
   {
     assert(info.valid());
     assert(!relativePath.empty());  // Embedding images not supported yet
     if(!rawData)
     {
-      return micromesh::Result::eFailure;
+      return {};
     }
-    m_relativePath = relativePath;
-    m_rawData      = std::unique_ptr<void, ImageioDeleter>(rawData, ImageioDeleter());
-    m_info         = info;
-    return micromesh::Result::eSuccess;
+    auto result            = std::unique_ptr<ToolImage>(new ToolImage());
+    result->m_relativePath = relativePath;
+    result->m_rawData      = std::unique_ptr<void, ImageioDeleter>(rawData, ImageioDeleter());
+    result->m_info         = info;
+    return result;
   }
 
   // Copy constructor
-  [[nodiscard]] micromesh::Result create(const ToolImage& other)
+  [[nodiscard]] static std::unique_ptr<ToolImage> create(const ToolImage& other)
   {
-    micromesh::Result result = create(other.m_info, other.m_relativePath);
-    if(result != micromesh::Result::eSuccess)
-    {
-      return result;
-    }
+    auto result            = std::unique_ptr<ToolImage>(new ToolImage());
+    result->m_relativePath = other.m_relativePath;
+    // Note: info may not be valid if copying from a source ToolImage that could not be read
+    result->m_info = other.m_info;
 
     // If this is an image from disk, keep it as such so it will be copied later
-    m_basePath = other.m_basePath;
+    result->m_basePath = other.m_basePath;
 
-    memcpy(raw(), other.raw(), m_info.totalBytes());
-    return micromesh::Result::eSuccess;
+    // If the image has already been read and decompressed from disk, copy the in-memory data
+    if(other.m_rawData)
+    {
+      result->m_rawData =
+          std::unique_ptr<void, ImageioDeleter>(imageio::allocateData(other.m_info.totalBytes()), ImageioDeleter());
+      memcpy(result->m_rawData.get(), other.raw(), result->m_info.totalBytes());
+    }
+
+    return result;
   }
-
-  void destroy() {}
-
-  ~ToolImage() { destroy(); }
 
   [[nodiscard]] bool save(const fs::path& basePath, const fs::path& relativePath);
 
@@ -206,34 +221,15 @@ public:
     // in float format for it to use.
     if(!m_heightmapData)
     {
-      bool ok;
-      // Embedded images must be converted
-      if(m_basePath.empty())
-      {
-        if(!raw())
-          return m_heightmap;
+      if(!raw())
+        return m_heightmap;
 
-        // TODO: add an imageio API to convert without this copy
-        imageio::ImageIOData heightmapData = imageio::allocateData(m_info.totalBytes());
-        memcpy(heightmapData, raw(), m_info.totalBytes());
-        ok              = imageio::convertFormat(&heightmapData, m_info.width, m_info.height, m_info.components,
-                                                 m_info.componentBitDepth, 1, 32);
-        m_heightmapData = std::unique_ptr<void, ImageioDeleter>(heightmapData, ImageioDeleter());
-      }
-      else
-      {
-        // HACK: imageio chooses sRGB for requested 8 bit formats and linear for
-        // requested 16 bit formats. Heightmaps have historically always been
-        // linear. Until there's a different API to read the color space in the
-        // image file itself, we need to re-load the image here and cannot just
-        // convert it.
-        Info originalInfo{m_info};
-        const_cast<Info&>(m_info).components        = 1;
-        const_cast<Info&>(m_info).componentBitDepth = 32;
-        m_heightmapData                             = load(m_basePath / m_relativePath);
-        ok                                          = static_cast<bool>(m_heightmapData);
-        const_cast<Info&>(m_info)                   = originalInfo;
-      }
+      // TODO: add an imageio API to convert without this copy
+      imageio::ImageIOData heightmapData = imageio::allocateData(m_info.totalBytes());
+      memcpy(heightmapData, raw(), m_info.totalBytes());
+      bool ok         = imageio::convertFormat(&heightmapData, m_info.width, m_info.height, m_info.components,
+                                               m_info.componentBitDepth, 1, 32);
+      m_heightmapData = std::unique_ptr<void, ImageioDeleter>(heightmapData, ImageioDeleter());
       if(ok)
       {
         m_heightmap = std::make_unique<HeightMap>(static_cast<int>(m_info.width), static_cast<int>(m_info.height),
@@ -249,8 +245,10 @@ public:
 
   imageio::ImageIOData raw() const
   {
-    assert(m_info.valid());  // did you call .create()? If only there was some way for the language+compiler to help us
-    if(!m_rawData && !m_loadAttempted)
+    // It is possible the file is an unknown format or simply doesn't exist, in
+    // which case m_info will not be valid. In this case, ToolImage serves just
+    // as a reference to the original path.
+    if(m_info.valid() && !m_rawData && !m_loadAttempted)
     {
       m_loadAttempted = true;
       m_rawData       = load(m_basePath / m_relativePath);
@@ -277,7 +275,19 @@ public:
     return {reinterpret_cast<T*>(ptr), m_info.totalPixels(), static_cast<ptrdiff_t>(m_info.componentBytes())};
   }
 
+  // Returns true if the data is unmodified from what was loaded
+  [[nodiscard]] bool isOriginalData() const
+  {
+    // Images are never modified in-place. If a base path exists, it is still
+    // the same as what was loaded from disk. Otherwise it is probably
+    // generated.
+    return !m_basePath.empty();
+  }
+
 private:
+  // Private default constructor. Use ::createInvalid() to be more explicit.
+  ToolImage() = default;
+
   std::unique_ptr<void, ImageioDeleter> load(const fs::path& path) const;
 
 #if 0

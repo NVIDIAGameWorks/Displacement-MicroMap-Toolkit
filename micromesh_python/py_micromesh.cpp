@@ -27,7 +27,6 @@
 #define TINYGLTF_NO_INCLUDE_STB_IMAGE_WRITE
 #include "third_party/stb/stb_image.h"
 #include "third_party/stb/stb_image_write.h"
-#include "tiny_gltf.h"
 // Should be removed if that is included in another static lib
 
 #define VMA_IMPLEMENTATION
@@ -276,10 +275,10 @@ PYBIND11_MODULE(micromesh_python, m) {
         .def_readwrite("referenceMeshTransform", &PyBakerInput::referenceMeshTransform)
         .def_readwrite("resamplerInput", &PyBakerInput::resamplerInput) // Disabled until fully supported
         .def_readwrite("heightmap", &PyBakerInput::heightmap)
-        .def_readwrite("normalMapFilepath", &PyBakerInput::normalMapFilepath)
-        .def_readwrite("normalMapResolution", &PyBakerInput::normalMapResolution)
-        .def_readwrite("uvRemapFilepath", &PyBakerInput::uvRemapFilepath)
-        .def_readwrite("uvRemapResolution", &PyBakerInput::uvRemapResolution)
+        .def_readwrite("quaternionMapFilepath", &PyBakerInput::quaternionMapFilepath)
+        .def_readwrite("quaternionMapResolution", &PyBakerInput::quaternionMapResolution)
+        .def_readwrite("offsetMapFilepath", &PyBakerInput::offsetMapFilepath)
+        .def_readwrite("offsetMapResolution", &PyBakerInput::offsetMapResolution)
         .def_readwrite("settings", &PyBakerInput::settings);
 
     py::class_<PyMicromeshData>(m, "MicromeshData")

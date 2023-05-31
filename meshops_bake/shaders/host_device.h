@@ -66,13 +66,13 @@ const uint
 
 // clang-format on
 
-struct PrimMeshInfo
+struct BakerMeshInfo
 {
   uint64_t vertexAddress;
   uint64_t indexAddress;
   uint64_t vertexDirectionBoundsAddress;
   uint64_t vertexDirectionBoundsOrigAddress;
-  int      materialIndex;
+  uint     padding_;
   uint     numTriangles;
 
   // Low+high mesh primitives are baked in pairs. When tracing from the low res
@@ -81,15 +81,19 @@ struct PrimMeshInfo
   float maxDisplacementWs;
 };
 
-#define MAX_SUBDIV_LEVELS 6
+#define BAKER_MAX_SUBDIV_LEVEL 5
+
+// Max. subdiv level + 1. 6 means handle levels 0 to 5 inclusive.
+#define BAKER_NUM_SUBDIV_LEVEL_MAPS (BAKER_MAX_SUBDIV_LEVEL + 1)
+
 struct SceneDescription
 {
-  uint64_t primLoInfoAddress;
-  uint64_t primHiInfoAddress;
+  uint64_t baseMeshAddress;
+  uint64_t referenceMeshAddress;
   uint64_t distancesAddress;
   uint64_t trianglesAddress;
   uint64_t triangleMinMaxsAddress;
-  uint64_t baryCoordsAddress[MAX_SUBDIV_LEVELS];
+  uint64_t baryCoordsAddress[BAKER_NUM_SUBDIV_LEVEL_MAPS];
 };
 
 struct FrameInfo
@@ -140,13 +144,12 @@ struct ResampleTextureInfo
 static_assert(sizeof(ResampleTextureInfo) == 4, "Minimum push constant size on NV GPUs exceeded");
 #endif
 
-struct PushHighLow
+struct BakerPushConstants
 {
   mat4 objectToWorld;
   mat4 worldToObject;
-  int  primMeshID;
-  //int   numBaryCoords;
-  int distOffset;
+  int  padding1_;
+  int  padding2_;
 
   // Tracing rays is based on direction vectors.
   // - Bidirectional                                   (!uniDirectional)
@@ -158,11 +161,11 @@ struct PushHighLow
   // - Max distance overridden                         ( replaceDirectionLength, maxDistance=...)
   //                   o---(hit)--> (hit)      |
   // - Max distance increased for heightmaps           ( highMeshHasDisplacement)
-  //   In addition to other options, min/max distance is extended by PrimMeshInfo::maxDisplacementWs
+  //   In addition to other options, min/max distance is extended by BakerMeshInfo::maxDisplacementWs
   //               |<  o---(hit)--> (hit)         |
   float maxDistance;              // Baking ray distances in world space
   uint  replaceDirectionLength;   // bool, use maxDistance instead of direction vector magnitude
-  uint  highMeshHasDisplacement;  // bool, conservatively extend ray distance by PrimMeshInfo::maxDisplacementWs
+  uint  highMeshHasDisplacement;  // bool, conservatively extend ray distance by BakerMeshInfo::maxDisplacementWs
   uint  uniDirectional;           // bool, only trace forwards, along the direction vector
   uint  hasDirectionBounds;       // bool, use per-vertex direction bounds if true, otherwise assume bias/scale of 0/1
   uint  lastBatch;                // bool, true to do disatance post-processing if this is the final batch for baking
@@ -182,7 +185,7 @@ struct PushHighLow
   uint resampleInstanceResolutions[MAX_RESAMPLE_TEXTURES];  // The mesh is rendered once for each unique output resolution
 };
 #ifdef __cplusplus
-static_assert(sizeof(PushHighLow) < 256, "Minimum push constant size on NV GPUs exceeded");
+static_assert(sizeof(BakerPushConstants) < 256, "Minimum push constant size on NV GPUs exceeded");
 #endif
 
 struct Triangle

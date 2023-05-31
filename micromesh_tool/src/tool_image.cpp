@@ -27,9 +27,7 @@ bool ToolImage::save(const fs::path& basePath, const fs::path& relativePath)
     LOGE("Error: ToolImage must be given an absolute path\n");
     return false;
   }
-
-  m_relativePath = relativePath;
-  if(m_relativePath.empty())
+  if(relativePath.empty())
   {
     LOGI("Skipping writing image with no relative path (%zu x %zu)\n", m_info.width, m_info.height);
     return false;
@@ -43,7 +41,7 @@ bool ToolImage::save(const fs::path& basePath, const fs::path& relativePath)
   // need saving.
   if(!m_basePath.empty())
   {
-    // If we're saving in the directory, no copy is needed.
+    // If we're saving the same image, no copy is needed.
     if(oldFilename == filename)
     {
       return true;
@@ -58,32 +56,43 @@ bool ToolImage::save(const fs::path& basePath, const fs::path& relativePath)
       LOGE("Error: failed to copy %s to %s: %s\n", oldFilename.string().c_str(), filename.string().c_str(), ec.message().c_str());
       return false;
     }
-    return true;
   }
-
-  VkFormat vkFormat = m_info.vkFormat();
-  if(vkFormat == VK_FORMAT_UNDEFINED)
+  else
   {
-    // An error has been printed already
-    return false;
+    VkFormat vkFormat = m_info.vkFormat();
+    if(vkFormat == VK_FORMAT_UNDEFINED)
+    {
+      // An error has been printed already
+      return false;
+    }
+
+    // The only way to get here without data is if the image was created at
+    // runtime (not from a file) but not immediately populated. This is a bug.
+    if(!m_rawData)
+    {
+      LOGE("Error: Generated image %s has no data to save\n", filename.string().c_str());
+      assert(false);
+      return false;
+    }
+
+    // Rewritten images are only saved as .png
+    if(m_relativePath.extension() != ".png")
+    {
+      m_relativePath.replace_extension(".png");
+      filename = basePath / m_relativePath;
+    }
+
+    LOGI("Writing %s (%zu x %zu)\n", relativePath.string().c_str(), m_info.width, m_info.height);
+    if(!imageio::writePNG(filename.string().c_str(), m_info.width, m_info.height, raw(), vkFormat))
+    {
+      LOGE("Writing %s failed!\n", filename.string().c_str());
+      return false;
+    }
   }
 
-  // The only way to get here without data is if the image was created at
-  // runtime (not from a file) but not immediately populated. This is a bug.
-  if(!m_rawData)
-  {
-    LOGE("Error: Generated image %s has no data to save\n", filename.string().c_str());
-    assert(false);
-    return false;
-  }
-
-  LOGI("Writing %s (%zu x %zu)\n", relativePath.string().c_str(), m_info.width, m_info.height);
-  if(!imageio::writePNG(filename.string().c_str(), m_info.width, m_info.height, raw(), vkFormat))
-  {
-    LOGE("Writing %s failed!\n", filename.string().c_str());
-    return false;
-  }
-
+  // Store the new path for future reference since saving was successful.
+  m_basePath     = basePath;
+  m_relativePath = relativePath;
   return true;
 }
 
@@ -91,7 +100,7 @@ std::unique_ptr<void, ToolImage::ImageioDeleter> ToolImage::load(const fs::path&
 {
   Info                                  verify;
   std::unique_ptr<void, ImageioDeleter> result;
-  assert(m_info.componentBitDepth);  // did you call .create()? If only there was some way for the language+compiler to help us
+  assert(m_info.componentBitDepth);  // should be set in ::create()
   imageio::ImageIOData ptr = imageio::loadGeneral(path.string().c_str(), &verify.width, &verify.height,
                                                   &verify.components, m_info.components, m_info.componentBitDepth);
   if(ptr)

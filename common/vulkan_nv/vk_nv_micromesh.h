@@ -30,6 +30,10 @@
 
 #include <vulkan/vulkan_core.h>
 
+#ifdef VK_ENABLE_BETA_EXTENSIONS
+#include <vulkan/vulkan_beta.h>
+#endif
+
 // for name, value in test:gmatch("(VK_[%w_]+) = ([%w_]+),") do print("#define "..name.."  ((VkStructureType)"..value..")") end
 
 
@@ -330,7 +334,6 @@ extern "C" {
 #define VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_DISPLACEMENT_MICROMAP_NV ((VkStructureType)1000397002)
 #define VK_PIPELINE_CREATE_RAY_TRACING_DISPLACEMENT_MICROMAP_BIT_NV  ((VkPipelineCreateFlagBits)0x10000000)
 #define VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISPLACEMENT_MICROMAP_UPDATE_NV ((VkBuildAccelerationStructureFlagBitsKHR)0x00000200)
-#define VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISPLACEMENT_MICROMAP_INSTANCE_NV ((VkBuildAccelerationStructureFlagBitsKHR)0x00000400)
 #define VK_MICROMAP_TYPE_DISPLACEMENT_MICROMAP_NV                    ((VkMicromapTypeEXT)1000397000)
 
   typedef struct VkPhysicalDeviceDisplacementMicromapFeaturesNV {

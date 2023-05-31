@@ -39,26 +39,26 @@ struct MeshTopologyData
   std::vector<micromesh::Range32>         vertexTriangleRanges;
   std::vector<uint32_t>                   vertexTriangleConnections;
   std::vector<uint32_t>                   vertexEdgeConnections;
-  std::vector<uint32_t>                   edgeVertices;
+  std::vector<micromesh::Vector_uint32_2> edgeVertices;
   std::vector<micromesh::Range32>         edgeTriangleRanges;
   std::vector<uint32_t>                   edgeTriangleConnections;
 
   // Returns an array of triangle indices that reference the given vertex index
-  ArrayView<uint32_t> getVertexTriangles(uint32_t vertIdx)
+  ArrayView<const uint32_t> getVertexTriangles(uint32_t vertIdx) const
   {
     auto range = vertexTriangleRanges[vertIdx];
     return ArrayView(vertexTriangleConnections).slice(range.first, range.count);
   }
 
   // Returns an array of edge indices that reference the given vertex index
-  ArrayView<uint32_t> getVertexEdges(uint32_t vertIdx)
+  ArrayView<const uint32_t> getVertexEdges(uint32_t vertIdx) const
   {
     auto range = vertexEdgeRanges[vertIdx];
     return ArrayView(vertexEdgeConnections).slice(range.first, range.count);
   }
 
   // Returns an array of triangle indices that reference the given edge index
-  ArrayView<uint32_t> getEdgeTriangles(uint32_t vertIdx)
+  ArrayView<const uint32_t> getEdgeTriangles(uint32_t vertIdx) const
   {
     auto range = edgeTriangleRanges[vertIdx];
     return ArrayView(edgeTriangleConnections).slice(range.first, range.count);

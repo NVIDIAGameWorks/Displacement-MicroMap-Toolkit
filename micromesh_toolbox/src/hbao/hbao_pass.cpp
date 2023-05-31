@@ -240,8 +240,7 @@ bool HbaoPass::initFrame(Frame& frame, const FrameConfig& config, VkCommandBuffe
   if(!m_slots.createID(frame.slot))
     return false;
 
-  frame.config        = config;
-  FrameIMGs& textures = frame.images;
+  frame.config = config;
 
   uint32_t width  = config.targetWidth;
   uint32_t height = config.targetHeight;

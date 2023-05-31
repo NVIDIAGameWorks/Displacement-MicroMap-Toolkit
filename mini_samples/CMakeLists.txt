@@ -54,3 +54,9 @@ function(DefaultBasicMakefile)
 endfunction()
 
 add_subdirectory(dmm_displacement)
+
+if(WIN32)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dx12_dmm_displacement")
+       add_subdirectory(dx12_dmm_displacement)
+    endif()
+endif()

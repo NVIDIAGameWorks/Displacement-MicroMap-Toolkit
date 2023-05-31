@@ -24,7 +24,7 @@ bool numpyArrayToVector(const py::array_t<T, py::array::c_style | py::array::for
 
     unsigned int nDim0 = (unsigned int)arrayProperties.shape[0];
 
-    if(static_cast<size_t>(arrayProperties.size * arrayProperties.itemsize) != nDim0 * sizeof(V))
+    if(arrayProperties.size * arrayProperties.itemsize != static_cast<decltype(arrayProperties.itemsize)>(nDim0 * sizeof(V)))
     {
       throw std::runtime_error("input array shape not compatible with vector");
     }
@@ -99,7 +99,7 @@ bool numpyArrayToArrayView(const py::array_t<T, py::array::c_style | py::array::
 
     V *values = reinterpret_cast<V*>(arrayProperties.ptr);
 
-    if(arrayProperties.size*arrayProperties.itemsize != static_cast<ssize_t>(nDim0 * sizeof(V)))
+    if(arrayProperties.size * arrayProperties.itemsize != static_cast<decltype(arrayProperties.itemsize)>(static_cast<size_t>(nDim0 * sizeof(V))))
     {
         throw std::runtime_error("input array shape not compatible with array view");
     }

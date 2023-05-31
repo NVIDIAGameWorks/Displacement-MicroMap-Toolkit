@@ -14,6 +14,7 @@
 
 #include <thread>
 
+#include "ui/ui_utilities.hpp"
 #include "ui_micromesh_process.hpp"
 #include "nvh/timesampler.hpp"
 #include "toolbox_viewer.hpp"
@@ -48,20 +49,15 @@ void globalSubdivLevel(ViewerSettings&                         settings,
 bool UiMicromeshProcessPipeline::onUI()
 {
   static bool       tool_running = false;
-  static bool       tool_error   = false;
   static bool       use_pretess  = false;
   static bool       use_remesher = false;
   static bool       use_baker    = false;
   static bool       use_displace = false;
-  static std::mutex toolMutex;
 
   static tool_remesh::ToolRemeshArgs                  remesh_args;
   static tool_bake::ToolBakeArgs                      bake_args{};
   static tool_tessellate::ToolPreTessellateArgs       pretess_args{};
   static tool_tessellate::ToolDisplacedTessellateArgs displace_args{};
-
-  static ImVec4 colActive   = ImVec4(0.1F, 0.8F, 0.1F, 1.0F);
-  static ImVec4 colInactive = ImVec4(0.8F, 0.1F, 0.1F, 1.0F);
 
   // Setting menu
   if(ImGui::Begin("Micromesh Pipeline"))
@@ -69,7 +65,6 @@ bool UiMicromeshProcessPipeline::onUI()
     // Viewer data access
     ViewerSettings&                               settings    = m_toolboxViewer->m_settings;
     std::unique_ptr<micromesh_tool::ToolContext>& toolContext = m_toolboxViewer->m_toolContext;
-    VkDevice                                      device      = m_toolboxViewer->m_device;
     GLFWwindow*                                   win_handel  = m_toolboxViewer->m_app->getWindowHandle();
     std::unique_ptr<ToolboxScene>&                scene_ref   = m_toolboxViewer->m_scenes[SceneVersion::eReference];
     std::unique_ptr<ToolboxScene>&                scene_base  = m_toolboxViewer->m_scenes[SceneVersion::eBase];
@@ -147,15 +142,12 @@ bool UiMicromeshProcessPipeline::onUI()
     // ----- RUN -----
     ImGui::Separator();
     bool run_pressed{};
-    {
-      std::lock_guard<std::mutex> lock(toolMutex);
-      ImGuiH::PushButtonColor(tool_running ? ImGuiHCol_ButtonRed : ImGuiHCol_ButtonGreen);
-      bool can_run = ((use_pretess || use_remesher || use_displace) && scene_ref->valid()) || (use_baker && scene_base->valid());
-      ImGui::BeginDisabled(!can_run);
-      run_pressed = ImGui::Button("RUN", ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !tool_running;
-      ImGui::EndDisabled();
-      ImGuiH::PopButtonColor();
-    }
+    ImGuiH::PushButtonColor(tool_running ? ImGuiHCol_ButtonRed : ImGuiHCol_ButtonGreen);
+    bool can_run = ((use_pretess || use_remesher || use_displace) && scene_ref->valid()) || (use_baker && scene_base->valid());
+    ImGui::BeginDisabled(!can_run);
+    run_pressed = ImGui::Button("RUN", ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !tool_running;
+    ImGui::EndDisabled();
+    ImGuiH::PopButtonColor();
     if(run_pressed)
     {
       settings.activtyStatus.activate("Tool running");
@@ -175,7 +167,8 @@ bool UiMicromeshProcessPipeline::onUI()
         scene_base->destroy();
 
         // Copy the reference to Base to be the Scene to use
-        copy_result = (micromesh::Result::eSuccess == base->create(reference));
+        base        = micromesh_tool::ToolScene::create(reference);
+        copy_result = static_cast<bool>(base);
         LOGI("Copy Reference to Base: %.3f\n", st.elapsed());
       }
 
@@ -237,12 +230,12 @@ bool UiMicromeshProcessPipeline::onUI()
           bary_filename.replace_extension(".bary");
           bake_args.baryFilename = bary_filename.string();
 
-          if(!reference->valid() && base->valid())
+          if(!reference && base)
           {
             second_step_result = tool_bake::toolBake(*toolContext, bake_args, base);
             any_error          = any_error || !second_step_result;
           }
-          else if(reference->valid() && base->valid())
+          else if(reference && base)
           {
             second_step_result = tool_bake::toolBake(*toolContext, bake_args, *reference, base);
             any_error          = any_error || !second_step_result;
@@ -257,18 +250,11 @@ bool UiMicromeshProcessPipeline::onUI()
           settings.geometryView.baked = true;
         }
 
-        // Tool state changed: done
-        {
-          std::lock_guard<std::mutex> lock(toolMutex);
-          tool_running = false;
-          tool_error   = any_error;
-        }
-        settings.activtyStatus.stop();
+        return !any_error;
       };
+      m_toolOperation = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-      executeOp();
-#else
-      std::thread(executeOp).detach();    // THREAD : Tools are done on a separated thread
+      m_toolOperation.wait();
 #endif
     }
 
@@ -326,31 +312,17 @@ bool UiMicromeshProcessPipeline::onUI()
   }
   ImGui::End();  // Micromesh
 
-  // Notify the user when there was an error processing, otherwise it isn't
-  // always obvious.
+  // Handle the result of tool operations
+  if(m_toolOperation.valid() && m_toolOperation.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
   {
-    std::lock_guard<std::mutex> lock(toolMutex);
-    if(tool_error)
+    tool_running = false;
+    if(!m_toolOperation.get())
     {
-      tool_error = false;
-      ImGui::OpenPopup("Error");
+      // Notify the user when there was an error processing, otherwise it isn't
+      // always obvious.
+      ImGuiH::ErrorMessageShow("The operation did not complete.\nCheck the log for details\n\n");
     }
-
-    // Always center this window when appearing
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-    if(ImGui::BeginPopupModal("Error", NULL, ImGuiWindowFlags_AlwaysAutoResize))
-    {
-      ImGui::Text("The operation did not complete.\nCheck the log for details\n\n");
-      ImGui::Separator();
-      if(ImGui::Button("OK", ImVec2(120, 0)))
-      {
-        ImGui::CloseCurrentPopup();
-      }
-      ImGui::SetItemDefaultFocus();
-      ImGui::EndPopup();
-    }
+    m_toolboxViewer->m_settings.activtyStatus.stop();
   }
 
   return false;
@@ -456,13 +428,12 @@ void UiMicromeshProcessPipeline::loadLine(std::string name, ViewerSettings::Rend
       view_settings.activtyStatus.activate("Loading Scene");
       vkDeviceWaitIdle(m_toolboxViewer->m_device);
       auto executeOp = [&, filename, view] {
-        m_toolboxViewer->createScene(filename, view == ViewerSettings::eReference ? SceneVersion::eReference : SceneVersion::eBase);
-        view_settings.activtyStatus.stop();
+        return m_toolboxViewer->createScene(filename, view == ViewerSettings::eReference ? SceneVersion::eReference :
+                                                                                           SceneVersion::eBase);
       };
+      m_loadingScene = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-      executeOp();
-#else
-      std::thread(executeOp).detach();    // THREAD : Tools are done on a separated thread
+      m_loadingScene.wait();
 #endif
     }
   }
@@ -479,6 +450,16 @@ void UiMicromeshProcessPipeline::loadLine(std::string name, ViewerSettings::Rend
     m_toolboxViewer->resetFrame();
   }
   ImGui::PopID();
+
+  if(m_loadingScene.valid() && m_loadingScene.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+  {
+    vkDeviceWaitIdle(m_toolboxViewer->m_device);
+    if(!m_loadingScene.get())
+    {
+      ImGuiH::ErrorMessageShow("Failed to load scene.\nCheck the log for details\n\n");
+    }
+    m_toolboxViewer->m_settings.activtyStatus.stop();
+  }
 };
 
 //-------------------------------------------------------------------------------------------------
@@ -509,9 +490,6 @@ bool UiMicromeshProcess::onUI()
   static tool_tessellate::ToolPreTessellateArgs       pretess_args{};
   static tool_tessellate::ToolDisplacedTessellateArgs displace_args{};
 
-  static ImVec4 colActive   = ImVec4(0.1F, 0.8F, 0.1F, 1.0F);
-  static ImVec4 colInactive = ImVec4(0.8F, 0.1F, 0.1F, 1.0F);
-
   static const char* slotNames[]     = {"Reference", "Base", "Scratch"};
   static int         item_source_idx = 0;
   static int         item_dest_idx   = 0;
@@ -524,7 +502,6 @@ bool UiMicromeshProcess::onUI()
     // Viewer data access
     ViewerSettings&                               settings      = m_toolboxViewer->m_settings;
     std::unique_ptr<micromesh_tool::ToolContext>& toolContext   = m_toolboxViewer->m_toolContext;
-    VkDevice                                      m_device      = m_toolboxViewer->m_device;
     GLFWwindow*                                   win_handel    = m_toolboxViewer->m_app->getWindowHandle();
     std::unique_ptr<ToolboxScene>&                scene_ref     = m_toolboxViewer->m_scenes[SceneVersion::eReference];
     std::unique_ptr<ToolboxScene>&                scene_base    = m_toolboxViewer->m_scenes[SceneVersion::eBase];
@@ -554,7 +531,7 @@ bool UiMicromeshProcess::onUI()
         ImGuiH::PopButtonColor();
         ImGui::Separator();
         ImGui::Separator();
-        ImGui::Text("");
+        ImGui::Text("%s", "");
         return run_pressed;
       }
     };
@@ -567,8 +544,9 @@ bool UiMicromeshProcess::onUI()
       bool           copy_result = true;
       if(item_source_idx != item_dest_idx)
       {
-        scene_dst->destroy();
-        copy_result = (micromesh::Result::eSuccess == scene_dst->create(scene_src));
+        scene_dst.reset();
+        scene_dst   = micromesh_tool::ToolScene::create(scene_src);
+        copy_result = static_cast<bool>(scene_dst);
         LOGI("Copy %s to %s: %.3f\n", slotNames[item_source_idx], slotNames[item_dest_idx], st.elapsed());
         if(!copy_result)
         {
@@ -627,8 +605,8 @@ bool UiMicromeshProcess::onUI()
     //
     // ----> source and target settings for all the operators
     //
-    int        numitems    = NUMSCENES;
-    const bool table_valid = ImGui::BeginTable("split", 2, ImGuiTableFlags_Resizable);
+    int numitems = NUMSCENES;
+    (void)ImGui::BeginTable("split", 2, ImGuiTableFlags_Resizable);
     ImGui::TableNextColumn();
     ImGui::Text("Source");  //Colored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), "Pink");
     if(ImGui::BeginListBox("##Source", ImVec2(-FLT_MIN, 4.f + float(numitems) * ImGui::GetTextLineHeightWithSpacing())))
@@ -672,8 +650,7 @@ bool UiMicromeshProcess::onUI()
       if(runSourceToTarget("RUN Copy"))
       {
         settings.activtyStatus.activate("Tool running");
-        tool_running     = true;
-        bool copy_result = false;
+        tool_running = true;
 
         SETUPSRCANDDEST
         if(copyScene(item_source_idx, item_dest_idx, scene_src, scene_dst, toolBoxScene_dest))
@@ -724,14 +701,11 @@ bool UiMicromeshProcess::onUI()
               settings.geometryView.slot = destGeometryView;
             }
           }
-          // Tool state changed: done
-          tool_running = false;
-          settings.activtyStatus.stop();
+          return result;
         };
+        m_toolOperation = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-        executeOp();
-#else
-        std::thread(executeOp).detach();  // THREAD : Tools are done on a separated thread
+        m_toolOperation.wait();
 #endif
       }
     }
@@ -774,15 +748,12 @@ bool UiMicromeshProcess::onUI()
               settings.geometryView.slot = destGeometryView;
             }
           }
-          // Tool state changed: done
-          tool_running = false;
-          settings.activtyStatus.stop();
           toolBoxScene_dest->setDirty(SceneDirtyFlags::eDeviceMesh);  // ask for rebuilding resources
+          return result;
         };
+        m_toolOperation = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-        executeOp();
-#else
-        std::thread(executeOp).detach();  // THREAD : Tools are done on a separated thread
+        m_toolOperation.wait();
 #endif
       }
     }
@@ -824,15 +795,12 @@ bool UiMicromeshProcess::onUI()
               settings.geometryView.slot = destGeometryView;
             }
           }
-          // Tool state changed: done
-          tool_running = false;
-          settings.activtyStatus.stop();
           toolBoxScene_dest->setDirty(SceneDirtyFlags::eDeviceMesh);  // ask for rebuilding resources
+          return result;
         };
+        m_toolOperation = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-        executeOp();
-#else
-        std::thread(executeOp).detach();  // THREAD : Tools are done on a separated thread
+        m_toolOperation.wait();
 #endif
       }
     }
@@ -844,7 +812,7 @@ bool UiMicromeshProcess::onUI()
       // ----> source and target settings for all the operators
       //
       int        numitems    = NUMSCENES;
-      const bool table_valid = ImGui::BeginTable("split", 2, ImGuiTableFlags_Resizable);
+      (void)ImGui::BeginTable("split", 2, ImGuiTableFlags_Resizable);
       ImGui::TableNextColumn();
       ImGui::Text("High-res Mesh");  //Colored(ImVec4(1.0f, 0.0f, 1.0f, 1.0f), "Pink");
       if(ImGui::BeginListBox("##REF", ImVec2(-FLT_MIN, 4 + float(numitems) * ImGui::GetTextLineHeightWithSpacing())))
@@ -887,7 +855,6 @@ bool UiMicromeshProcess::onUI()
       ImGuiH::PopButtonColor();
       if(run_pressed)
       {
-        bool result = false;
         settings.activtyStatus.activate("Baker");
         vkDeviceWaitIdle(m_toolboxViewer->m_device);  // Make sure nothing is on the fly
 
@@ -905,11 +872,11 @@ bool UiMicromeshProcess::onUI()
           bary_filename.replace_extension(".bary");
           bake_args.baryFilename = bary_filename.string();
 
-          if(!hires_scene->valid() && lores_scene->valid())
+          if(!hires_scene && lores_scene)
           {
             result = tool_bake::toolBake(*toolContext, bake_args, lores_scene);
           }
-          else if(hires_scene->valid() && lores_scene->valid())
+          else if(hires_scene && lores_scene)
           {
             result = tool_bake::toolBake(*toolContext, bake_args, *hires_scene, lores_scene);
           }
@@ -935,19 +902,29 @@ bool UiMicromeshProcess::onUI()
             settings.geometryView.baked = true;
             m_toolboxViewer->setAllDirty(SceneDirtyFlags::eDeviceMesh);
           }
-          // Tool state changed: done
-          tool_running = false;
-          settings.activtyStatus.stop();
+          return result;
         };
+        m_toolOperation = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-        executeOp();
-#else
-        std::thread(executeOp).detach();  // THREAD : Tools are done on a separated thread
+        m_toolOperation.wait();
 #endif
       }
     }
   }
   ImGui::End();  // Micromesh
+
+  // Handle the result of tool operations
+  if(m_toolOperation.valid() && m_toolOperation.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+  {
+    tool_running = false;
+    if(!m_toolOperation.get())
+    {
+      // Notify the user when there was an error processing, otherwise it isn't
+      // always obvious.
+      ImGuiH::ErrorMessageShow("The operation did not complete.\nCheck the log for details\n\n");
+    }
+    m_toolboxViewer->m_settings.activtyStatus.stop();
+  }
 
   return false;
 }
@@ -1114,7 +1091,10 @@ int UiMicromeshProcess::loadSaveDelLine(std::string                    name,
             v = SceneVersion::eScratch;
             break;
         }
-        m_toolboxViewer->createScene(filename, v);
+        if(!m_toolboxViewer->createScene(filename, v))
+        {
+          return false;
+        }
         dispbaked                   = m_toolboxViewer->getScene(v)->hasBary();
         settings.geometryView.baked = dispbaked;
         // Note: this code will change the overlay automatically
@@ -1128,12 +1108,11 @@ int UiMicromeshProcess::loadSaveDelLine(std::string                    name,
           settings.shellView.slot  = view;
           settings.shellView.baked = dispbaked;
         }
-        view_settings.activtyStatus.stop();
+        return true;
       };
+      m_loadingScene = std::async(executeOp);  // THREAD : Tools are done on a separated thread
 #ifdef DONTUSEMT
-      executeOp();
-#else
-      std::thread(executeOp).detach();    // THREAD : Tools are done on a separated thread
+      m_loadingScene.wait();
 #endif
     }
   }
@@ -1177,5 +1156,16 @@ int UiMicromeshProcess::loadSaveDelLine(std::string                    name,
     m_toolboxViewer->resetFrame();
   }
   ImGui::PopID();
+
+  if(m_loadingScene.valid() && m_loadingScene.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+  {
+    vkDeviceWaitIdle(m_toolboxViewer->m_device);
+    if(!m_loadingScene.get())
+    {
+      ImGuiH::ErrorMessageShow("Failed to load scene.\nCheck the log for details\n\n");
+    }
+    m_toolboxViewer->m_settings.activtyStatus.stop();
+  }
+
   return selected;
 };

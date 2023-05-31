@@ -44,6 +44,14 @@ template <> struct tinygltfTypeInfo<nvmath::vec4i>  { static const int component
 template <> struct tinygltfTypeInfo<nvmath::vec4ui> { static const int componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT; static const int type = TINYGLTF_TYPE_VEC4; };
 // clang-format on
 
+constexpr const char* tinygltfTypeName(int type, int componentType);
+
+template <class T>
+constexpr const char* tinygltfTypeName()
+{
+  return tinygltfTypeName(T::type, T::componentType);
+}
+
 inline meshops::MeshSlice makeMeshSlice(const nvh::GltfPrimMesh& primMesh)
 {
   meshops::MeshSlice result;

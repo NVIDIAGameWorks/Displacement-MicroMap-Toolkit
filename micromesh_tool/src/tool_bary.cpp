@@ -10,12 +10,13 @@
  * its affiliates is strictly prohibited.
  */
 
+#include <memory>
 #include <tool_bary.hpp>
 #include <nvh/nvprint.hpp>
 
 namespace micromesh_tool {
 
-micromesh::Result ToolBary::create(const fs::path& basePath, const fs::path& relativePath)
+std::unique_ptr<ToolBary> ToolBary::create(const fs::path& basePath, const fs::path& relativePath)
 {
   fs::path filename = basePath / relativePath;
 
@@ -23,33 +24,27 @@ micromesh::Result ToolBary::create(const fs::path& basePath, const fs::path& rel
   if(!loadBaryFile(filename, *baryFile))
   {
     LOGE("Error: failed to load '%s'\n", filename.string().c_str());
-    return micromesh::Result::eFailure;
+    return {};
   }
-  *this = ToolBary(std::move(baryFile), relativePath);
-  return micromesh::Result::eSuccess;
+  auto result = std::unique_ptr<ToolBary>(new ToolBary(std::move(baryFile), relativePath));
+  return result;
 }
 
-micromesh::Result ToolBary::create(std::vector<baryutils::BaryContentData>&& baryContents, const fs::path& relativePath)
+std::unique_ptr<ToolBary> ToolBary::create(std::vector<baryutils::BaryContentData>&& baryContents, const fs::path& relativePath)
 {
-  *this = ToolBary(std::move(baryContents), relativePath);
-  return micromesh::Result::eSuccess;
+  auto result = std::unique_ptr<ToolBary>(new ToolBary(std::move(baryContents), relativePath));
+  return result;
 }
 
-micromesh::Result ToolBary::create(const ToolBary& other)
+std::unique_ptr<ToolBary> ToolBary::create(const ToolBary& other)
 {
   std::vector<baryutils::BaryContentData> baryContents;
   for(auto& group : other.groups())
   {
     baryContents.emplace_back(group);
   }
-  *this = ToolBary(std::move(baryContents), other.relativePath());
-  return micromesh::Result::eSuccess;
-}
-
-void ToolBary::destroy()
-{
-  m_baryFile.reset();
-  m_baryContents.clear();
+  auto result = std::unique_ptr<ToolBary>(new ToolBary(std::move(baryContents), other.relativePath()));
+  return result;
 }
 
 // Returns a new ContentView with just one bary::Group. Note that the basic
@@ -109,6 +104,7 @@ ToolBary::ToolBary(std::vector<baryutils::BaryContentData>&& baryContents, const
     : m_baryContents(baryContents)
     , m_relativePath(relativePath)
 {
+  assert(!m_baryContents.empty());
   for(auto& content : m_baryContents)
   {
     m_views.push_back(content.getView());

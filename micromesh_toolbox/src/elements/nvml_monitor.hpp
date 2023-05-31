@@ -51,14 +51,17 @@ class NvmlMonitor
 public:
   struct Measure
   {
-    std::vector<float> memory;  // Memory measurement in KB
-    std::vector<float> load;    // Load measurement [0, 100]
+    uint64_t           last_memory;  // Memory usage in bytes of last sample
+    std::vector<float> memoryKB;     // Memory in KiB
+    std::vector<float> load;         // Load measurement [0, 100]
   };
 
   struct GpuInfo
   {
-    uint32_t    max_mem{0};       // Max memory for each GPU
+    uint64_t max_mem{0};  // Max memory for each GPU in bytes
+#ifdef _WIN32
     uint32_t    driver_model{0};  // Driver model: WDDM/TCC
+#endif
     std::string name;
   };
 
@@ -91,21 +94,19 @@ public:
     for(int i = 0; i < (int)m_physicalGpuCount; i++)
     {
       // Sizing the data
-      m_measure[i].memory.resize(m_limit);
+      m_measure[i].memoryKB.resize(m_limit);
       m_measure[i].load.resize(m_limit);
 
       // Retrieving general capabilities
       nvmlDevice_t      device;
       nvmlMemory_t      memory;
-      nvmlDriverModel_t driver_model;
-      nvmlDriverModel_t pdriver_model;
 
       // Find the memory of each cards
       result = nvmlDeviceGetHandleByIndex(i, &device);
       if(NVML_SUCCESS != result)
         return;
       nvmlDeviceGetMemoryInfo(device, &memory);
-      m_info[i].max_mem = (uint32_t)(memory.total / (uint64_t)(1024));  // Convert to KB
+      m_info[i].max_mem = memory.total;
 
       // name
       char name[80];
@@ -113,11 +114,15 @@ public:
       if(NVML_SUCCESS == result)
         m_info[i].name = name;
 
+#ifdef _WIN32
       // Find the model: TCC or WDDM
+      nvmlDriverModel_t driver_model;
+      nvmlDriverModel_t pdriver_model;
       result = nvmlDeviceGetDriverModel(device, &driver_model, &pdriver_model);
       if(NVML_SUCCESS != result)
         return;
       m_info[i].driver_model = driver_model;
+#endif
     }
     startTime = std::chrono::high_resolution_clock::now();
     m_valid   = true;
@@ -150,7 +155,8 @@ public:
     {
       nvmlDevice_t device;
       nvmlDeviceGetHandleByIndex(gpu_id, &device);
-      m_measure[gpu_id].memory[m_offset] = getMemory(device);
+      m_measure[gpu_id].last_memory        = getMemory(device);
+      m_measure[gpu_id].memoryKB[m_offset] = static_cast<float>((m_measure[gpu_id].last_memory + 1023) / 1024);
       m_measure[gpu_id].load[m_offset]   = getLoad(device);
     }
   }
@@ -163,13 +169,13 @@ public:
   int            getOffset() { return m_offset; }
 
 private:
-  float getMemory(nvmlDevice_t device)
+  uint64_t getMemory(nvmlDevice_t device)
   {
     try
     {
       nvmlMemory_t memory{};
       nvmlDeviceGetMemoryInfo(device, &memory);
-      return static_cast<float>(memory.used / (uint64_t)(1000));  // Convert to KB
+      return memory.used;
     }
     catch(std::exception ex)
     {
@@ -347,7 +353,7 @@ private:
   std::vector<Measure> m_measure;
   std::vector<GpuInfo> m_info;  // Max memory for each GPU
   SysInfo              m_sysInfo;
-  uint32_t             m_offset{0};
+  uint32_t             m_offset{0};  // Index of the most recent cpu load sample
 
   uint32_t m_limit{100};
   uint32_t m_interval{100};  // ms

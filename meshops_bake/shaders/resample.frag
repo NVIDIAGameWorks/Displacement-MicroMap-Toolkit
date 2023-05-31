@@ -25,9 +25,9 @@
 #include "host_device.h"
 
 // Buffers
-layout(buffer_reference, scalar) readonly buffer PrimMeshInfos
+layout(buffer_reference, scalar) readonly buffer BakerMeshInfos
 {
-  PrimMeshInfo i[];
+  BakerMeshInfo i[];
 };
 layout(buffer_reference, scalar) readonly buffer Vertices
 {
@@ -53,7 +53,7 @@ layout(set = 0, binding = eTexturesDist, r32f) uniform image2D[] texturesDist;
 
 layout(push_constant) uniform PushContrive_
 {
-  PushHighLow pc;
+  BakerPushConstants pc;
 };
 
 layout(location = 0) in Interpolants
@@ -234,8 +234,8 @@ void main()
   const vec3 wStart = vec3(pc.objectToWorld * vec4(start, 1.0));
   const vec3 wDir   = mat3(pc.objectToWorld) * dir;
 
-  PrimMeshInfos   pInfo_              = PrimMeshInfos(sceneDesc.primLoInfoAddress);
-  PrimMeshInfo    pinfo               = pInfo_.i[pc.primMeshID];
+  BakerMeshInfos   pInfo_              = BakerMeshInfos(sceneDesc.baseMeshAddress);
+  BakerMeshInfo    pinfo               = pInfo_.i[0];
   Indices         indices             = Indices(pinfo.indexAddress);
   Vertices        vertices            = Vertices(pinfo.vertexAddress);
   DirectionBounds directionBoundsOrig = DirectionBounds(pinfo.vertexDirectionBoundsOrigAddress);

@@ -205,7 +205,9 @@ struct MicromeshCombinedData
     initFormats();
   }
 
-  void fillAddresses(const MicromeshSetCompressedVK& micro, const MicromeshSetCompressedVK::MeshData& meshData)
+  void fillAddresses(const MicromeshSetCompressedVK&           micro,
+                     const MicromeshSetCompressedVK::MeshData& meshData,
+                     const MicromeshSplitPartsVk*              splitParts)
   {
     // per mesh
     bindingData.formats      = meshData.binding.addr + offsetof(MicromeshCombinedData, formats);
@@ -223,9 +225,10 @@ struct MicromeshCombinedData
     bindingData.attrTriangleOffsets = meshData.attrTriangles.addr;
 
     // common
-    bindingData.vertices        = micro.vertices.addr;
-    bindingData.triangleIndices = micro.triangleIndices.addr;
-    bindingData.descendInfos    = micro.descends.addr;
+    assert(splitParts->vertices.addr);
+    bindingData.vertices        = splitParts->vertices.addr;
+    bindingData.triangleIndices = splitParts->triangleIndices.addr;
+    bindingData.descendInfos    = splitParts->descends.addr;
 
     // the missing `bindingData.umajor2bmap` is handled in `initBmapIndices`
   }

@@ -106,44 +106,46 @@ static int defaultMaterial(tinygltf::Model& output)
   return 0;
 }
 
-static void instantiateGltfMeshes(tinygltf::Model& output)
+static void createGltfMesh(tinygltf::Model& output, const meshops::MeshView& meshView)
 {
   // Single material
   int materialID = defaultMaterial(output);
 
+  // Append mesh data to buffers, create buffer views and accessors
+  tinygltf::Primitive primitive = tinygltfAppendPrimitive(output, meshView);
+  primitive.material            = materialID;
+
+  // Add the primitive to a mesh
+  tinygltf::Mesh mesh;
+  mesh.primitives.push_back(std::move(primitive));
+  size_t meshId = output.meshes.size();
+  output.meshes.push_back(std::move(mesh));
+
+  // Instantiate the mesh
+  tinygltf::Node node;
+  node.mesh     = static_cast<int>(meshId);
+  size_t nodeId = output.nodes.size();
+  output.nodes.push_back(std::move(node));
+
+  // Add the instance to a scene
   tinygltf::Scene scene;
-  for(size_t meshId = 0; meshId < output.meshes.size(); ++meshId)
-  {
-    // Update all primitves to use the one material
-    for(auto& primitive : output.meshes[meshId].primitives)
-      primitive.material = materialID;
-
-    // Instantiate all meshes
-    int nodeID = static_cast<int>(output.nodes.size());
-    {
-      tinygltf::Node node;
-      node.mesh = static_cast<int>(meshId);
-      output.nodes.push_back(std::move(node));
-    }
-    scene.nodes.push_back(nodeID);
-  }
-
+  scene.nodes.push_back(static_cast<int>(nodeId));
   output.scenes.push_back(std::move(scene));
+
+  // Metadata
   output.asset.copyright = "NVIDIA Corporation";
-  output.asset.generator = "uMesh glTF ";
+  output.asset.generator = "micromesh_tool";
   output.asset.version   = "2.0";  // glTF version 2.0
 }
 
 static int createImage(int resolution, size_t components, size_t componentBitDepth, std::string filename, ToolImageVector& images)
 {
-
-  int imageIndex = static_cast<int>(images.size());
-  images.push_back(std::make_unique<micromesh_tool::ToolImage>());
+  int                             imageIndex = static_cast<int>(images.size());
   micromesh_tool::ToolImage::Info normalImageInfo;
   normalImageInfo.width = normalImageInfo.height = static_cast<size_t>(resolution);
   normalImageInfo.components                     = components;
   normalImageInfo.componentBitDepth              = componentBitDepth;
-  (void)images.back()->create(normalImageInfo, filename);
+  images.push_back(micromesh_tool::ToolImage::create(normalImageInfo, filename));
   return imageIndex;
 }
 
@@ -290,8 +292,7 @@ static bool generatePlane(uint32_t resolution, tinygltf::Model& output)
 {
   meshops::MeshData meshData;
   generatePlane(resolution, meshData);
-  appendToTinygltfModel(output, meshops::MeshView(meshData));
-  instantiateGltfMeshes(output);
+  createGltfMesh(output, meshops::MeshView(meshData));
   return true;
 }
 
@@ -318,11 +319,19 @@ static bool generateCube(meshops::MeshData& meshData, int resolution)
                                {0.125, 0.5},  {0.375, 0.5},  {0.125, 0.25}, {0.375, 0.25}, {0.375, 0.5},  {0.625, 0.5},
                                {0.375, 0.25}, {0.625, 0.25}, {0.375, 0.75}, {0.625, 0.75}, {0.375, 0.5},  {0.625, 0.5}};
 
-  // Attempt to place texture coordinates on pixels, or at least UVs on the image edges
-  BiasScalef transform(0.5f / static_cast<float>(resolution), static_cast<float>(resolution - 1) / static_cast<float>(resolution));
+  // Attempt to place texture coordinates on pixel centers. Without this, the
+  // displaced cubes have clearly visible creases. Start with adding a half
+  // pixel margin. This fixes image border values.
+  float      resolutionf = static_cast<float>(resolution);
+  BiasScalef transform(0.5f / resolutionf, (resolutionf - 1.0f) / resolutionf);
   for(nvmath::vec2f& coord : meshData.vertexTexcoords0)
   {
     coord = transform * coord;
+
+    // Snap coordinates to the nearest pixel center so we have height values
+    // exactly on axis aligned edges. This fixes interior/shared edge heights.
+    coord.x = (std::round(coord.x * resolutionf - 0.5f) + 0.5f) / resolutionf;
+    coord.y = (std::round(coord.y * resolutionf - 0.5f) + 0.5f) / resolutionf;
   }
   return true;
 }
@@ -334,8 +343,7 @@ static bool generateCube(tinygltf::Model& output)
   {
     return false;
   }
-  appendToTinygltfModel(output, meshops::MeshView(meshData));
-  instantiateGltfMeshes(output);
+  createGltfMesh(output, meshops::MeshView(meshData));
   return true;
 }
 
@@ -480,8 +488,7 @@ static bool generateTerrain(micromesh_tool::ToolContext& context, uint32_t resol
     return false;
   }
 
-  appendToTinygltfModel(output, meshops::MeshView(meshData));
-  instantiateGltfMeshes(output);
+  createGltfMesh(output, meshops::MeshView(meshData));
 
   // Generate a heightmap from perlin noise
   auto heights = createHeightMap(resolution, "terrain_height.png", BiasScalef{}, output, images);
@@ -730,9 +737,7 @@ static bool generateDisplacedCube(micromesh_tool::ToolContext& context, uint32_t
     }
   }
 
-  appendToTinygltfModel(output, meshops::MeshView(meshData));
-  instantiateGltfMeshes(output);
-
+  createGltfMesh(output, meshops::MeshView(meshData));
   return true;
 }
 
@@ -766,8 +771,7 @@ bool toolGenerate(micromesh_tool::ToolContext& context, const ToolGenerateArgs& 
   }
   if(result)
   {
-    scene = std::make_unique<micromesh_tool::ToolScene>();
-    scene->create(std::move(model), std::move(images), {});
+    scene = micromesh_tool::ToolScene::create(std::move(model), std::move(images), {});
   }
   return result;
 }

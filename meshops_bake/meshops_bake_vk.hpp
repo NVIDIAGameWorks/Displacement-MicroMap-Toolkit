@@ -14,9 +14,11 @@
 #include <meshops/meshops_vk.h>
 #include <meshops/meshops_api.h>
 #include <meshops/meshops_operations.h>
+#include "meshops_bake_batch.hpp"
 #include "nvvk/context_vk.hpp"
 #include "nvvk/raytraceKHR_vk.hpp"
 #include "nvvk/descriptorsets_vk.hpp"
+#include "vulkan/vulkan_core.h"
 
 namespace meshops {
 
@@ -24,14 +26,6 @@ namespace meshops {
 namespace glsl_shared {
 #include "shaders/host_device.h"
 }  // namespace glsl_shared
-
-struct GeometryBatch
-{
-  uint32_t triangleOffset;
-  uint32_t triangleCount;
-  uint32_t batchIndex;
-  uint32_t totalBatches;
-};
 
 struct PipelineContainer
 {
@@ -47,20 +41,83 @@ struct DescriptorContainer
   VkDescriptorPool            pool{VK_NULL_HANDLE};
 };
 
-struct SceneVK
+struct BakerMeshVK
 {
-  std::vector<nvvk::Buffer> verticesBuf;  // One buffer per primitive (Vertex)
-  std::vector<nvvk::Buffer> indicesBuf;   // One buffer per primitive (uint32_t)
-  nvvk::Buffer              primInfoBuf;  // Array of PrimMeshInfo
-  std::vector<uint32_t>     numVertices;
-  std::vector<uint32_t>     numTriangles;  // Buffer per primitive
-  size_t                    totalTriangles{};
+  void create(nvvk::ResourceAllocator* alloc, VkCommandBuffer cmdBuf, const meshops::MeshView& meshView, bool requireDirectionBounds);
+  bool            createTessellated(micromesh::OpContext         micromeshContext,
+                                    nvvk::ResourceAllocator*     alloc,
+                                    const meshops::OpBake_input& input,
+                                    VkCommandBuffer              cmdBuf,
+                                    const meshops::MeshView&     meshView,
+                                    const GeometryBatch&         batch,
+                                    int                          maxSubdivLevel);
+  void            destroy(nvvk::ResourceAllocator* alloc);
+  static uint64_t estimateGpuMemory(uint64_t triangles, uint64_t vertices, bool requireDirectionBounds);
+
+  nvvk::Buffer verticesBuf;
+  nvvk::Buffer directionBoundsBuf;
+  nvvk::Buffer directionBoundsOrigBuf;
+  nvvk::Buffer indicesBuf;
+  nvvk::Buffer primInfoBuf;  // Array of BakerMeshInfo
+  uint32_t     numVertices  = 0;
+  uint32_t     numTriangles = 0;  // Buffer per primitive
+};
+
+// Pairs a VkPipeline with the descriptor set for a single instance.
+struct BakerPipeline
+{
+  void create(VkDevice device, VkBuffer sceneDescBuf, VkAccelerationStructureKHR referenceSceneTlas);
+  void destroy(VkDevice device);
+  void run(meshops::ContextVK& vk, const meshops::OpBake_input& input, glsl_shared::BakerPushConstants& pushConstants, bool finalBatch);
+
+  PipelineContainer   pipeline;
+  DescriptorContainer descriptor;
+};
+
+struct ResamplerPipeline
+{
+  void create(VkDevice                                  device,
+              VkBuffer                                  sceneDescBuf,
+              VkAccelerationStructureKHR                referenceSceneTlas,
+              const std::vector<VkDescriptorImageInfo>& inputTextures,
+              const std::vector<VkDescriptorImageInfo>& outputTextures,
+              const std::vector<VkDescriptorImageInfo>& distanceTextures);
+  void destroy(VkDevice device);
+  void run(meshops::ContextVK&              vk,
+           const meshops::OpBake_input&     input,
+           ArrayView<meshops::Texture>      outputTextures,
+           glsl_shared::BakerPushConstants& pushConstants,
+           nvvk::Buffer&                    triangleMinMaxBuf);
+
+  PipelineContainer   pipeline;
+  DescriptorContainer descriptor;
+};
+
+struct BakerReferenceScene
+{
+  using BlasInput = nvvk::RaytracingBuilderKHR::BlasInput;
+  bool            create(micromesh::OpContext         micromeshContext,
+                         meshops::ContextVK&          vk,
+                         const meshops::OpBake_input& input,
+                         const meshops::MeshView&     meshView,
+                         const GeometryBatch&         batch);
+  void            destroy(nvvk::ResourceAllocator* alloc);
+  static uint64_t estimateGpuMemory(VkDevice device, uint64_t triangles, uint64_t vertices);
+  static BlasInput createBlasInput(VkDeviceAddress vertexAddress, VkDeviceAddress indexAddress, uint32_t numVertices, uint32_t numTriangles);
+  void createBottomLevelAS(VkDevice device);
+  void createTopLevelAS(const meshops::OpBake_input& input);
+
+  BakerMeshVK referenceVk;
+
+  // The baker and resampler use raytracing to find intersections with the
+  // reference scene
+  nvvk::RaytracingBuilderKHR rtBuilder;
 };
 
 class BakerVK
 {
 public:
-  BakerVK(micromesh::OpContext micromeshContext, meshops::ContextVK& vkContext, unsigned int threadCount);
+  BakerVK(micromesh::OpContext micromeshContext, meshops::ContextVK& vkContext);
   ~BakerVK();
 
   bool bakeAndResample(const meshops::OpBake_input&              input,
@@ -70,90 +127,30 @@ public:
                        const std::vector<VkDescriptorImageInfo>& outputTextures,
                        const std::vector<VkDescriptorImageInfo>& distanceTextures,
                        ArrayView<meshops::Texture>               outputTextureInfo);
-  void createVkResources(const meshops::OpBake_input& info,
-                         const meshops::MeshView&     lowScene,
-                         const meshops::MeshView&     highScene,
-                         MutableArrayView<float>      distances);
-  bool createVkHighGeometry(const meshops::OpBake_input& info, const meshops::MeshView& highScene, const GeometryBatch& batch);
-  void destroyVkHighGeometry();
-  void createVertexBuffer(VkCommandBuffer cmdBuf, const meshops::MeshView& meshView, SceneVK& vkScene);
-  bool createTessellatedVertexBuffer(const meshops::OpBake_input& info,
-                                     VkCommandBuffer              cmdBuf,
-                                     const meshops::MeshView&     meshView,
-                                     SceneVK&                     vkScene,
-                                     const GeometryBatch&         batch,
-                                     int                          maxSubdivLevel);
-  auto primitiveToGeometry(const meshops::MeshView& prim,
-                           VkDeviceAddress          vertexAddress,
-                           VkDeviceAddress          indexAddress,
-                           uint32_t                 numVertices,
-                           uint32_t                 numTriangles);
-  void createBottomLevelAS(const meshops::MeshView& meshView, const SceneVK& vkScene, const GeometryBatch& batch);
-  void createTopLevelAS(const meshops::OpBake_input& info, const meshops::MeshView& meshView, const GeometryBatch& batch);
-  void fitDirectionBounds(const meshops::OpBake_input& info, MutableArrayView<float> distances);
-  [[nodiscard]] bool getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs,
-                                     nvmath::vec2f&                 globalMinMax,
-                                     bool                           filterZeroToOne,
-                                     const uint32_t                 maxFilterWarnings);
-  void getDistanceFromBuffer(const meshops::OpBake_input&    info,
-                             MutableArrayView<nvmath::vec2f> outDirectionBounds,
-                             MutableArrayView<float>         distances,
-                             MutableArrayView<nvmath::vec2f> triangleMinMaxs,
-                             nvmath::vec2f&                  globalMinMax);
-  void destroy();
-  void destroyVkScene(SceneVK& vkScene);
-  void createBakerPipeline();
-  void destroyBakerPipeline();
-  void createResamplerPipeline(const std::vector<VkDescriptorImageInfo>& inputTextures,
-                               const std::vector<VkDescriptorImageInfo>& outputTextures,
-                               const std::vector<VkDescriptorImageInfo>& distanceTextures);
-  void destroyResamplerPipeline();
-  void runComputePass(const meshops::OpBake_input& info, bool finalBatch);
-  void runResampler(const meshops::OpBake_input& info, ArrayView<meshops::Texture> outputTextures);
+  void create(const meshops::OpBake_input& input, MutableArrayView<float> distances);
+  static uint64_t estimateBaseGpuMemory(uint64_t distances, uint64_t triangles, uint64_t vertices, bool requireDirectionBounds);
+  static uint64_t estimateBatchGpuMemory(VkDevice device, uint64_t triangles, uint64_t vertices);
+  void            fitDirectionBounds(const meshops::OpBake_input& input, MutableArrayView<float> distances);
+  void            getDistanceFromBuffer(const meshops::OpBake_input&    input,
+                                        MutableArrayView<nvmath::vec2f> outDirectionBounds,
+                                        MutableArrayView<float>         distances,
+                                        MutableArrayView<nvmath::vec2f> triangleMinMaxs,
+                                        nvmath::vec2f&                  globalMinMax);
+  void            destroy();
 
 private:
-  // Vulkan Info
-  VkDevice         m_device{VK_NULL_HANDLE};
-  VkPhysicalDevice m_physicalDevice{VK_NULL_HANDLE};
-
-  nvvk::Context::Queue m_queueT;
-  nvvk::Context::Queue m_queueC;
-  nvvk::Context::Queue m_queueGCT;
+  meshops::ContextVK& m_vk;
 
   micromesh::OpContext m_micromeshContext;
 
-  // Vulkan resources
-  SceneVK                   m_lowVk;
-  SceneVK                   m_highVk;
-  nvvk::Buffer              m_distanceBuf;
-  nvvk::Buffer              m_trianglesBuf;
-  nvvk::Buffer              m_triangleMinMaxBuf;       // per-triangle direction-length-relative (min, max) pairs
-  nvvk::Buffer              m_directionBoundsBuf;      // per-vertex direction-length-relative (start, end) pairs
-  nvvk::Buffer              m_directionBoundsOrigBuf;  // copy of initial values for maintaining a max trace dist
-  std::vector<nvvk::Buffer> m_baryCoordBuf;            // 0..5
-  nvvk::Buffer              m_sceneDescBuf;
-  PipelineContainer         m_pContainer;
-  DescriptorContainer       m_dContainer;
+  BakerMeshVK  m_baseVk;
+  nvvk::Buffer m_distanceBuf;        // baker result - a linear array of floats
+  nvvk::Buffer m_trianglesBuf;       // per-triangle microvertex offsets, glsl_shared::Triangle
+  nvvk::Buffer m_triangleMinMaxBuf;  // per-triangle direction-length-relative displacement distance (min, max) pairs
+  std::vector<nvvk::Buffer> m_baryCoordBuf;  // Micro-triangle coordinates in bary space
 
-  struct TextureResampling
-  {
-    PipelineContainer   pipeline;
-    DescriptorContainer descriptor;
-  };
-
-  TextureResampling m_resampling;
-
-  // Memory allocator
-  nvvk::ResourceAllocator& m_alloc;  // Allocator for buffer, images, acceleration structures
-
-  // Utilities
-  nvvk::RaytracingBuilderKHR m_rtBuilder;  // To build BLAS and TLAS
-
-  glsl_shared::PushHighLow m_push;
-
-  uint32_t m_maxNumBaryCoord{0};
-
-  unsigned int m_threadCount;
+  // Shader push constants. These persist between calls to bakeAndResample().
+  glsl_shared::BakerPushConstants m_push;
 };
 
 }  // namespace meshops

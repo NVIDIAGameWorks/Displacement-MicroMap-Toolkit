@@ -15,6 +15,13 @@
 
 namespace microdisp {
 
+void MicromeshSplitPartsVk::deinit(ResourcesVK& res)
+{
+  res.destroy(vertices);
+  res.destroy(descends);
+  res.destroy(triangleIndices);
+}
+
 void MicromeshSetCompressedVK::initBasics(ResourcesVK& res, const bary::ContentView& bary, bool useBaseTriangles, bool useMips)
 {
   memset(usedFormats, 0, sizeof(usedFormats));
@@ -97,11 +104,13 @@ void MicromeshSetCompressedVK::initBasics(ResourcesVK& res, const bary::ContentV
     res.simpleUploadBuffer(meshData.distances, basic.values + (basic.valuesInfo->valueByteSize * baryGroup.valueFirst));
   }
 }
-void MicromeshSetCompressedVK::uploadMeshDatasBinding(nvvk::StagingMemoryManager* staging, VkCommandBuffer cmd)
+void MicromeshSetCompressedVK::uploadMeshDatasBinding(nvvk::StagingMemoryManager*  staging,
+                                                      VkCommandBuffer              cmd,
+                                                      const MicromeshSplitPartsVk* splitParts)
 {
   for(const auto& meshData : meshDatas)
   {
-    meshData.combinedData->fillAddresses(*this, meshData);
+    meshData.combinedData->fillAddresses(*this, meshData, splitParts);
 
     staging->cmdToBuffer(cmd, meshData.binding.info.buffer, meshData.binding.info.offset, meshData.binding.info.range,
                          meshData.combinedData);
@@ -176,9 +185,6 @@ void MicromeshSetCompressedVK::deinit(ResourcesVK& res)
   }
 
   res.destroy(umajor2bmap);
-  res.destroy(triangleIndices);
-  res.destroy(vertices);
-  res.destroy(descends);
 
   meshDatas.clear();
 }

@@ -489,6 +489,31 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpGenerateVertexTangentSpace(C
                                                                                const OpGenerateVertexTangentSpace_input* inputs,
                                                                                OpGenerateVertexTangentSpace_modified* modifieds);
 
+struct OpApplyBounds_input
+{
+  // must have vertexDirectionBounds
+  meshops::MeshView meshView;
+};
+
+struct OpApplyBounds_modified
+{
+  // must have vertexPositions
+  // must have vertexDirections
+  meshops::ResizableMeshView* meshView;
+};
+
+// Apply vertexDirectionBounds to vertexPositions and vertexDirections. This
+// results in less data needed to render a micromesh, but modifies the original
+// positions. One reason to keep the data separate is to be able to render the
+// original mesh without micromaps. If textures have been resampled from a
+// reference mesh with vertexDirectionBounds defined (created by meshopsOpRemesh
+// and updated by meshopsOpBake if OpBake_settings::fitDirectionBounds is set),
+// they won't be valid for the original mesh anyway.
+MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpApplyBounds(Context                    context,
+                                                                size_t                     count,
+                                                                const OpApplyBounds_input* inputs,
+                                                                OpApplyBounds_modified*    modifieds);
+
 //////////////////////////////////////////////////////////////////////////
 // Tessellation
 
@@ -863,9 +888,9 @@ struct OpBake_settings
 
   bool fitDirectionBounds = false;
 
-  // Rudimentary memory limit. Baking will be split into batches to maintain the
-  // limit.
-  uint64_t memLimitBytes = 4096ULL << 20;
+  // Rudimentary memory limit override. Baking will be split into batches to
+  // fit within the available memory, or memLimitBytes if non-zero.
+  uint64_t memLimitBytes = 0;
 
   // Output displacement value layout
   bary::ValueLayout uncompressedLayout = bary::ValueLayout::eTriangleBirdCurve;

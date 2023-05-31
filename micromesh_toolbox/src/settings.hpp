@@ -43,6 +43,8 @@ enum RasterPipelines : int
   eRasterPipelineVector,
   eRasterPipelineMicromeshSolid,
   eRasterPipelineMicromeshWire,
+  eRasterPipelineHeightmapSolid,
+  eRasterPipelineHeightmapWire,
   eRasterPipelineNum
 };
 
@@ -182,6 +184,11 @@ struct ViewerSettings
     int32_t pretessellateBias           = 0;
     int32_t decimateRateFromSubdivLevel = 0;
   } tools;
+
+  // Heightmaps
+  int   heightmapSubdivLevel{HEIGHTMAP_MAX_SUBDIV_LEVEL};
+  float heightmapScale{1.0f};
+  float heightmapOffset{0.0f};
 
   std::vector<Light> lights;
 

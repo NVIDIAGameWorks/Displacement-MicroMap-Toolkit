@@ -40,4 +40,7 @@ bool InputText(const char* label, std::string* str, ImGuiInputTextFlags flags, I
 
 bool LoadFileButtons(GLFWwindow* glfwin, std::string& result, const char* title, const char* exts);
 
+void ErrorMessageShow(const char* message);
+void ErrorMessageRender();
+
 }  // namespace ImGuiH

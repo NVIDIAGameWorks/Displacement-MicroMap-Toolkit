@@ -203,8 +203,9 @@ bool tessellateQuads(int targetSubdivisionDiff, const std::vector<nvmath::vec2ui
         uint32_t       vertIdx = y * (tessellation.x + 1) + x;
         const uint32_t u       = 1;
         const uint32_t v       = tessellation.x + 1;
-        auto off = mesh.triangleVertices.begin() + ((y * tessellation.x + x) * 2 + 1) - meshSet.flat.triangleVertices.begin();
-        assert(static_cast<size_t>(off) < meshSet.flat.triangleVertices.size());
+        assert(static_cast<size_t>(mesh.triangleVertices.begin() + ((y * tessellation.x + x) * 2 + 1)
+                                   - meshSet.flat.triangleVertices.begin())
+               < meshSet.flat.triangleVertices.size());
         mesh.triangleVertices[(y * tessellation.x + x) * 2 + 0] = {vertIdx, vertIdx + u, vertIdx + u + v};
         mesh.triangleVertices[(y * tessellation.x + x) * 2 + 1] = {vertIdx, vertIdx + u + v, vertIdx + v};
       }

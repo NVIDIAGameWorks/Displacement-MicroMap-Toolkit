@@ -8,11 +8,10 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-import os, io, sys
+import os, io, sys, subprocess
 import pathlib
 import argparse
 import struct
-import numpy as np
 
 parser = argparse.ArgumentParser(description='Runs tests for micromesh_toolkit python bindings')
 parser.add_argument('--moduleDir', required=True, type=pathlib.Path, help='Directory containing the .so (linux) or .pyd (windows) module')
@@ -25,7 +24,10 @@ sys.path.insert(0, str(args.moduleDir))
 
 print("Entering " + os.path.dirname(os.path.realpath('__file__')), file=sys.stderr)
 
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'numpy'])
+
 import micromesh_python as pymm
+import numpy as np
 
 print("micromesh_python module objects:", file=sys.stderr)
 for name in dir(pymm):
@@ -76,10 +78,10 @@ bakeInput.referenceMeshTransform = referenceMeshTransform
 bakeInput.heightmap.filepath = str(meshDir / "cracks" / "height.png")
 bakeInput.heightmap.bias = 0.0
 bakeInput.heightmap.scale = 1.0
-bakeInput.normalMapFilepath = str(resultsDir / "normal.png")
-bakeInput.normalMapResolution = 32
-bakeInput.uvRemapFilepath = str(resultsDir / "uvremap.png")
-bakeInput.uvRemapResolution = 32
+bakeInput.quaternionMapFilepath = str(resultsDir / "quaternionMap.png")
+bakeInput.quaternionMapResolution = 32
+bakeInput.offsetMapFilepath = str(resultsDir / "offsetMap.png")
+bakeInput.offsetMapResolution = 32
 
 textureInputs = ["height.png", "height.png"]
 textureOutputs = ["outHeight.png", "outHeight2.png"]

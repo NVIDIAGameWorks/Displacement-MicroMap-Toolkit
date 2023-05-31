@@ -209,8 +209,6 @@ private:
   // Load all the textures in the given list into VRAM; assumes they aren't
   // already in VRAM.
   bool loadResamplingTextures(nvvk::Context::Queue queueGCT, const std::vector<GPUTextureIndex>& textureIndices);
-  // Returns the URI for a newly generated texture.
-  std::string getNewTextureURI(const BakerManagerConfig& info, size_t outputTextureIndex) const;
   // Returns the filename (relative to the working directory) that a given
   // texture would have if it was cached.
   std::string getCacheFilename(GPUTextureIndex textureIndex) const;

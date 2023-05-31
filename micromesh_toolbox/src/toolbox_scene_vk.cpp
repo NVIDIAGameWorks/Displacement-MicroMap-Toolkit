@@ -11,6 +11,8 @@
  */
 
 #include <cinttypes>
+#include "meshops/meshops_array_view.h"
+#include "micromap/microdisp_shim.hpp"
 #include "tiny_gltf.h"
 #include "toolbox_scene_vk.hpp"
 #include "meshops/meshops_vk.h"
@@ -19,7 +21,10 @@
 #include "nvh/gltfscene.hpp"
 #include "nvvk/images_vk.hpp"
 #include "shaders/dh_scn_desc.h"
+#include "shaders/device_host.h"
+#include "vulkan/vulkan_core.h"
 #include "vulkan_mutex.h"
+#include "micromesh/micromesh_utils.h"
 
 ToolboxSceneVk::ToolboxSceneVk(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, meshops::Context context, nvvk::Context::Queue extraQueue)
     : m_ctx(ctx)
@@ -45,6 +50,11 @@ void ToolboxSceneVk::create(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn)
 
   m_hasDisplacementMicromeshExt = m_ctx->hasDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME);
 
+  // Create tables/meshlets of micro-vertex positions and topology for rasterizing meshes
+  // with micromaps and heightmaps.
+  microdisp::ResourcesVK res(*m_alloc, cmd);
+  microdisp::initSplitPartsSubTri(res, m_micromeshSplitPartsVK);
+
   createMaterialBuffer(cmd, scn);
   createInstanceInfoBuffer(cmd, scn);
   if(!createDeviceMeshBuffer(cmd, scn))
@@ -59,13 +69,14 @@ void ToolboxSceneVk::create(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn)
     return;
   }
 
-
   // Buffer references
   SceneDescription scene_desc{};
-  scene_desc.materialAddress       = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bMaterial.buffer);
-  scene_desc.deviceMeshInfoAddress = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceMeshInfo.buffer);
-  scene_desc.deviceBaryInfoAddress = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceBaryInfo.buffer);
-  scene_desc.instInfoAddress       = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bInstances.buffer);
+  scene_desc.materialAddress           = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bMaterial.buffer);
+  scene_desc.deviceMeshInfoAddress     = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceMeshInfo.buffer);
+  scene_desc.deviceBaryInfoAddress     = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceBaryInfo.buffer);
+  scene_desc.instInfoAddress           = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bInstances.buffer);
+  scene_desc.splitPartsVerticesAddress = m_micromeshSplitPartsVK.vertices.addr;
+  scene_desc.splitPartsIndicesAddress  = m_micromeshSplitPartsVK.triangleIndices.addr;
 
   auto lock    = GetVkQueueOrAllocatorLock();
   m_bSceneDesc = m_alloc->createBuffer(cmd, sizeof(SceneDescription), &scene_desc,
@@ -122,12 +133,14 @@ void ToolboxSceneVk::createMaterialBuffer(VkCommandBuffer cmd, const micromesh_t
     shade_materials.push_back(s);
   }
 
-  // In case the scene material was empty, create a default one
-  if(scene_materials.m_materials.empty())
+  // Add the scene's default material at the end
   {
-    nvh::GltfMaterial defaultMat;
-    GltfShadeMaterial s = convertMaterial(defaultMat);
-    shade_materials.push_back(s);
+    nvh::GltfScene  scene_material_default;
+    tinygltf::Model tmp_model;
+    tmp_model.materials.push_back(scn.material(-1));
+    scene_material_default.importMaterials(tmp_model);
+    assert(scene_material_default.m_materials.size() == 1);
+    shade_materials.push_back(convertMaterial(scene_material_default.m_materials[0]));
   }
 
   // Create the buffer of all scene materials
@@ -145,16 +158,16 @@ void ToolboxSceneVk::createInstanceInfoBuffer(VkCommandBuffer cmd, const microme
   assert(scn.model().scenes.size() > 0);
   nvh::ScopedTimer _st("- Create Instance Buffer");
 
-  const std::vector<micromesh_tool::ToolScene::PrimitiveInstance>& prim_instances = scn.getPrimitiveInstances();
+  const std::vector<micromesh_tool::ToolScene::Instance>& instances = scn.instances();
 
   std::vector<InstanceInfo> inst_info;
-  inst_info.reserve(prim_instances.size());
-  for(const auto& prim_inst : prim_instances)
+  inst_info.reserve(instances.size());
+  for(const auto& instance : instances)
   {
     InstanceInfo info{};
-    info.objectToWorld = prim_inst.worldMatrix;
-    info.worldToObject = nvmath::invert(prim_inst.worldMatrix);
-    info.materialID    = prim_inst.material;
+    info.objectToWorld = instance.worldMatrix;
+    info.worldToObject = nvmath::invert(instance.worldMatrix);
+    info.materialID    = scn.meshes()[instance.mesh]->relations().material;
     inst_info.push_back(info);
   }
 
@@ -206,24 +219,52 @@ bool ToolboxSceneVk::createDeviceMeshBuffer(VkCommandBuffer cmd, micromesh_tool:
       return false;
     }
     m_deviceMeshes.push_back(d);
+
+    float bias;
+    float scale;
+    int   imageIndex;
+    if(scn.getHeightmap(mesh.relations().material, bias, scale, imageIndex))
+    {
+      // Create the base mesh topology
+      meshops::MeshTopologyData topology;
+      {
+        meshops::OpBuildTopology_input input;
+        input.meshView = meshView;
+        meshops::OpBuildTopology_output output;
+        output.meshTopology = &topology;
+        if(meshops::meshopsOpBuildTopology(m_context, 1, &input, &output) != micromesh::Result::eSuccess)
+        {
+          LOGE("Error: failed to build mesh topology\n");
+          return false;
+        }
+      }
+      m_meshWatertightIndices.push_back(createWatertightIndicesBuffer(cmd, meshView.triangleVertices, topology));
+    }
+    else
+    {
+      // Create a null element to keep indexing consistent with m_deviceMeshes.
+      m_meshWatertightIndices.emplace_back();
+    }
   }
 
   std::vector<DeviceMeshInfo> device_mesh_infos;
   device_mesh_infos.reserve(m_deviceMeshes.size());
-  for(auto& device : m_deviceMeshes)
+  for(size_t i = 0; i < m_deviceMeshes.size(); ++i)
   {
-    meshops::DeviceMeshVK* vk = meshops::meshopsDeviceMeshGetVK(device);
+    auto&                  mesh   = m_deviceMeshes[i];
+    meshops::DeviceMeshVK* meshVk = meshops::meshopsDeviceMeshGetVK(mesh);
     DeviceMeshInfo         info{};
-    info.triangleVertexIndexBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->triangleVertexIndexBuffer.buffer);
-    info.triangleAttributesBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->triangleAttributesBuffer.buffer);
-    info.vertexPositionNormalBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexPositionNormalBuffer.buffer);
-    info.vertexTangentSpaceBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexTangentSpaceBuffer.buffer);
-    info.vertexTexcoordBuffer     = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexTexcoordBuffer.buffer);
-    info.vertexDirectionsBuffer   = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexDirectionsBuffer.buffer);
-    info.vertexDirectionBoundsBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexDirectionBoundsBuffer.buffer);
-    info.vertexImportanceBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, vk->vertexImportanceBuffer.buffer);
-    info.deviceAttribFlags      = vk->deviceAttribFlags;
-    info.sourceAttribFlags      = vk->sourceAttribFlags;
+    info.triangleVertexIndexBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->triangleVertexIndexBuffer.buffer);
+    info.triangleAttributesBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->triangleAttributesBuffer.buffer);
+    info.vertexPositionNormalBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexPositionNormalBuffer.buffer);
+    info.vertexTangentSpaceBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexTangentSpaceBuffer.buffer);
+    info.vertexTexcoordBuffer   = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexTexcoordBuffer.buffer);
+    info.vertexDirectionsBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexDirectionsBuffer.buffer);
+    info.vertexDirectionBoundsBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexDirectionBoundsBuffer.buffer);
+    info.vertexImportanceBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexImportanceBuffer.buffer);
+    info.triangleWatertightIndicesBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_meshWatertightIndices[i].buffer);
+    info.deviceAttribFlags = meshVk->deviceAttribFlags;
+    info.sourceAttribFlags = meshVk->sourceAttribFlags;
     device_mesh_infos.push_back(info);
   }
 
@@ -291,7 +332,7 @@ bool ToolboxSceneVk::createDeviceBaryBuffer(VkCommandBuffer cmd, nvvk::Context::
       else
       {
         m_barys.back()->addMicromap(m_context, *m_alloc, extraQueue.queue, extraQueue.familyIndex, cmd, usageFlags,
-                                    groupView, *displacedMesh->second);
+                                    m_micromeshSplitPartsVK, groupView, *displacedMesh->second);
         const DeviceMicromap& micromap = deviceBary->micromaps().back();
 
         info.baryValuesBuffer    = micromap.valuesAddress();
@@ -320,6 +361,98 @@ bool ToolboxSceneVk::createDeviceBaryBuffer(VkCommandBuffer cmd, nvvk::Context::
   m_dutil->DBG_NAME(m_bDeviceBaryInfo.buffer);
 
   return true;
+}
+
+
+//--------------------------------------------------------------------------------------------------
+// Create heightmap displacement seam welding information
+nvvk::Buffer ToolboxSceneVk::createWatertightIndicesBuffer(VkCommandBuffer                          cmd,
+                                                           meshops::ArrayView<const nvmath::vec3ui> indices,
+                                                           const meshops::MeshTopologyData&         topology)
+{
+  // Default to no edge sanitization
+  WatertightIndices ignored{/*.seamEdge =*/{ivec2{WATERTIGHT_INDICES_INVALID_VERTEX}, ivec2{WATERTIGHT_INDICES_INVALID_VERTEX},
+                                            ivec2{WATERTIGHT_INDICES_INVALID_VERTEX}},
+                            /*.padding_ =*/{},
+                            /*.watertightCornerVertex =*/ivec3{WATERTIGHT_INDICES_INVALID_VERTEX},
+                            /*.adjacentTriangles =*/ivec3{WATERTIGHT_INDICES_INVALID_VERTEX}};
+
+  std::vector<WatertightIndices> triInfos(indices.size(), ignored);
+
+  meshops::ArrayView<const micromesh::Vector_uint32_3> triVertices(indices);
+  meshops::ArrayView<const micromesh::Vector_uint32_3> triVerticesWt(topology.triangleVertices);
+
+  // Resolve cracks when tessellating and displacing with a heightmap. See TriInfo.
+  // UVs at base triangle corners are snapped to the watertight index.
+  // UVs along shared edges, not includin the corners, are averaged.
+  // We only do this if triangles have a been split due to different normals/UVs.
+  for(uint32_t triIdx = 0; triIdx < static_cast<uint32_t>(triVertices.size()); ++triIdx)
+  {
+    WatertightIndices& triInfo = triInfos[triIdx];
+
+    // If the watertight vertex ID is different to the regular one, get the shader to use that for corner vertices
+    micromesh::Vector_uint32_3 tri   = triVertices[triIdx];
+    micromesh::Vector_uint32_3 triWt = triVerticesWt[triIdx];
+
+    // Skip degenerate triangles
+    if(micromesh::meshIsTriangleDegenerate(triWt))
+      continue;
+
+    triInfo.watertightCornerVertex.x = tri.x == triWt.x ? WATERTIGHT_INDICES_INVALID_VERTEX : triWt.x;
+    triInfo.watertightCornerVertex.y = tri.y == triWt.y ? WATERTIGHT_INDICES_INVALID_VERTEX : triWt.y;
+    triInfo.watertightCornerVertex.z = tri.z == triWt.z ? WATERTIGHT_INDICES_INVALID_VERTEX : triWt.z;
+
+    // Find adjacent split triangles.
+    // edge ordering (vertices of each edge are unordered): {v0,v1}, {v1,v2}, {v2,v0}
+    micromesh::Vector_uint32_3 triEdgesWt = topology.triangleEdges[triIdx];
+    for(uint32_t edgeIdx = 0; edgeIdx < 3; ++edgeIdx)
+    {
+      uint32_t edgeWt = (&triEdgesWt.x)[edgeIdx];
+
+      // Compute the indices of the edge vertices in the current triangle
+      micromesh::Vector_uint32_2 edgeVerticesWt = topology.edgeVertices[edgeWt];
+      uint32_t                   edgeVertex0Idx = micromesh::topoTriangleFindVertex(triWt, edgeVerticesWt.x);
+      uint32_t                   edgeVertex1Idx = micromesh::topoTriangleFindVertex(triWt, edgeVerticesWt.y);
+      uint32_t                   edgeVertex0    = (&tri.x)[edgeVertex0Idx];
+      uint32_t                   edgeVertex1    = (&tri.x)[edgeVertex1Idx];
+      nvmath::vec2i              edgeVertices{edgeVertex0, edgeVertex1};
+
+      // Search adjacent triangles
+      for(auto& otherTriIdx : topology.getEdgeTriangles(edgeWt))
+      {
+        if(triIdx == otherTriIdx)
+          continue;
+
+        // Store per-triangle watertight indices for dynamic heightmap LOD.
+        triInfo.adjacentTriangles[edgeIdx] = otherTriIdx;
+
+        // Compute the indices of the current triangle's edge's vertices in the other triangle, found by matching
+        // the indices in the watertight triangle.
+        micromesh::Vector_uint32_3 otherTri   = triVertices[otherTriIdx];
+        micromesh::Vector_uint32_3 otherTriWt = triVerticesWt[otherTriIdx];
+        uint32_t      otherEdgeVertex0Idx     = micromesh::topoTriangleFindVertex(otherTriWt, edgeVerticesWt.x);
+        uint32_t      otherEdgeVertex1Idx     = micromesh::topoTriangleFindVertex(otherTriWt, edgeVerticesWt.y);
+        uint32_t      otherEdgeVertex0        = (&otherTri.x)[otherEdgeVertex0Idx];
+        uint32_t      otherEdgeVertex1        = (&otherTri.x)[otherEdgeVertex1Idx];
+        nvmath::vec2i otherEdgeVertices{otherEdgeVertex0, otherEdgeVertex1};
+
+        // If the adjacent watertight triangle has different vertices, we need to weld the edge
+        if(edgeVertices != otherEdgeVertices)
+        {
+          // Make edge order consistent for triangle primTriIdx. If the order of the two is not one of the three
+          // expexted, swap them. Needed because getEdgeVertices() doesn't/couldn't have consistent pair ordering.
+          if(!((edgeVertex0Idx == 0 && edgeVertex1Idx == 1) || (edgeVertex0Idx == 1 && edgeVertex1Idx == 2)
+               || (edgeVertex0Idx == 2 && edgeVertex1Idx == 0)))
+            std::swap(otherEdgeVertices.x, otherEdgeVertices.y);
+
+          // Write the other triangle's edge's vertex indices for reference by draw_bary_lod.mesh
+          triInfo.seamEdge[edgeIdx] = otherEdgeVertices;
+        }
+      }
+    }
+  }
+
+  return m_alloc->createBuffer(cmd, triInfos, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
 }
 
 void ToolboxSceneVk::createTextureImages(VkCommandBuffer cmd, const std::vector<tinygltf::Texture>& textures, const ToolImageVector& images)
@@ -504,11 +637,20 @@ bool ToolboxSceneVk::createImage(const VkCommandBuffer& cmd, SceneImage& image)
 
 void ToolboxSceneVk::destroy()
 {
-  for(auto& device : m_deviceMeshes)
+  for(auto& mesh : m_deviceMeshes)
   {
-    meshops::meshopsDeviceMeshDestroy(m_context, device);
+    meshops::meshopsDeviceMeshDestroy(m_context, mesh);
   }
   m_deviceMeshes = {};
+
+  for(auto& buffer : m_meshWatertightIndices)
+  {
+    m_alloc->destroy(buffer);
+  }
+  m_meshWatertightIndices.clear();
+
+  microdisp::ResourcesVK res(*m_alloc, VK_NULL_HANDLE);
+  m_micromeshSplitPartsVK.deinit(res);
 
   auto lock = GetVkQueueOrAllocatorLock();
   m_alloc->destroy(m_bMaterial);

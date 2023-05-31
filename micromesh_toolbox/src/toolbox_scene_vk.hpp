@@ -61,6 +61,9 @@ private:
   void               createInstanceInfoBuffer(VkCommandBuffer cmd, const micromesh_tool::ToolScene& scn);
   [[nodiscard]] bool createDeviceMeshBuffer(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn);
   [[nodiscard]] bool createDeviceBaryBuffer(VkCommandBuffer cmd, nvvk::Context::Queue extraQueue, micromesh_tool::ToolScene& scn);
+  nvvk::Buffer createWatertightIndicesBuffer(VkCommandBuffer                          cmd,
+                                             meshops::ArrayView<const nvmath::vec3ui> triVertices,
+                                             const meshops::MeshTopologyData&         topology);
   void createTextureImages(VkCommandBuffer cmd, const std::vector<tinygltf::Texture>& textures, const ToolImageVector& images);
   void loadImage(micromesh_tool::ToolImage& toolImage, SceneImage& image);
   bool createImage(const VkCommandBuffer& cmd, SceneImage& image);
@@ -81,6 +84,14 @@ private:
   nvvk::Buffer m_bSceneDesc;
 
   std::vector<meshops::DeviceMesh> m_deviceMeshes;
+
+  // Buffers of per-triangle WatertightIndices structures for rendering
+  // heightmaps without cracks.
+  std::vector<nvvk::Buffer> m_meshWatertightIndices;
+
+  // Common tables of micro-vertex positions and topology. Used when rasterizing
+  // micromeshes and heightmaps.
+  microdisp::MicromeshSplitPartsVk m_micromeshSplitPartsVK;
 
   // Device equivalents of ToolScene::barys(). Typically there is only one, with
   // a group/micromap per ToolMesh.

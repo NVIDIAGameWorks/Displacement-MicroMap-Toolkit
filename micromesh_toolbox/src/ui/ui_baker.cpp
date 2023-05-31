@@ -84,9 +84,29 @@ void uiBaker(tool_bake::ToolBakeArgs& bake_args, ViewerSettings::GlobalToolSetti
   PE::entry(
       "Use PN Triangles", [&]() { return ImGui::Checkbox("##UsePNTriangles", &bake_args.heightmapPNtriangles); },
       "Use smooth Point-Normal Triangle surfaces (Vlachos 2001) when tessellating a high-res mesh with heightmaps.");
+  PE::entry("Heightmap Subdiv. Bias",
+            [&] { return ImGui::SliderInt("##HeightmapSubdivBias", (int*)&bake_args.highTessBias, -5, 5); });
   PE::entry(
-      "Discard Input Bounds", [&]() { return ImGui::Checkbox("##DiscardBounds", &bake_args.discardDirectionBounds); },
+      "Generate Heightmap Directions",
+      [&] { return ImGui::Checkbox("##DirectionsGen", &bake_args.heightmapDirectionsGen); },
+      "Computes smooth heightmap displacement direction vectors. Mesh normals are used otherwise.");
+  ImGui::BeginDisabled(!bake_args.heightmapDirectionsGen);
+  PE::entry("Direction Generation Method", [&] {
+    static const std::array<const char*, 3> reduce_names = {"Linear", "Normalized Linear", "Tangent"};
+    return ImGui::Combo("##Op", (int*)&bake_args.heightmapDirectionsOp, reduce_names.data(),
+                        static_cast<int>(reduce_names.size()));
+  });
+  ImGuiH::tooltip(
+      "Linear = angle-weighted average of adjacent face normals; Normalized Linear = average + normalize to unit "
+      "length; Tangent = preserve sharp edges");
+  ImGui::EndDisabled();
+  PE::entry(
+      "Discard Input Bounds", [&]() { return ImGui::Checkbox("##DiscardBounds", &bake_args.discardInputBounds); },
       "Discards any input direction vector bounds. They will be re-created if Fit Direction Bounds is enabled.");
+  PE::entry(
+      "Apply Direction Bounds", [&]() { return ImGui::Checkbox("##ApplyBounds", &bake_args.applyDirectionBounds); },
+      "Applies any direction bounds to the positions and direction vectors after baking. This saves some space but "
+      "loses the ability to render the original geometry without micromaps applied");
 
   // *** Note: we are currently only supporting compressed data ***
   //PE::entry(

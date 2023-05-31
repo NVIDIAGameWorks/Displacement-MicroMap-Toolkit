@@ -39,8 +39,7 @@ namespace tool_tessellate {
 
 bool toolDisplacedTessellateParse(int argc, char** argv, ToolDisplacedTessellateArgs& args, std::ostream& os)
 {
-  bool              printHelp       = false;
-  bool              edgeLengthBased = false;
+  bool              printHelp = false;
   std::string       heightmapDirections;
   CommandLineParser parser("displacedtessellate: tessellates and displaces a mesh with bary or heightmap displacement");
   parser.addArgument({"--help"}, &printHelp, "Print Help");

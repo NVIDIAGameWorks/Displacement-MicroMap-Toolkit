@@ -594,8 +594,6 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsTextureToSaver(Context        
 
     for(uint32_t m = 0; m < mipCount; m++)
     {
-      const void* readData = nullptr;
-
       size_t mipSize = meshopsTextureGetMipDataSize(tex, 0);
 
       if(cmd)

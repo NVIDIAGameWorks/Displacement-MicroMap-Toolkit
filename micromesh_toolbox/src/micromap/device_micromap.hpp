@@ -34,14 +34,15 @@ enum DeviceMicromeshUsageFlagBits : uint64_t
 class DeviceMicromap
 {
 public:
-  void     init(meshops::Context         meshopsContext,
-                nvvk::ResourceAllocator& alloc,
-                VkQueue                  queue,
-                uint32_t                 queueFamily,
-                VkCommandBuffer          cmd,
-                uint64_t                 usageFlags,
-                const bary::ContentView& bary,
-                uint8_t*                 decimateEdgeFlags);
+  void     init(meshops::Context                        meshopsContext,
+                nvvk::ResourceAllocator&                alloc,
+                VkQueue                                 queue,
+                uint32_t                                queueFamily,
+                VkCommandBuffer                         cmd,
+                uint64_t                                usageFlags,
+                const microdisp::MicromeshSplitPartsVk& splitParts,
+                const bary::ContentView&                bary,
+                const uint8_t*                          decimateEdgeFlags);
   void     deinit(nvvk::ResourceAllocator& alloc);
   uint64_t valuesAddress() const { return nvvk::getBufferDeviceAddress(m_device, m_baryValues.buffer); }
   uint64_t trianglesAddress() const { return nvvk::getBufferDeviceAddress(m_device, m_baryTriangles.buffer); }
@@ -87,14 +88,15 @@ class DeviceBary
 {
 public:
   DeviceBary() = default;
-  void addMicromap(meshops::Context                meshopsContext,
-                   nvvk::ResourceAllocator&        alloc,
-                   VkQueue                         queue,
-                   uint32_t                        queueFamily,
-                   VkCommandBuffer                 cmd,
-                   uint64_t                        usageFlags,
-                   const bary::ContentView&        bary,
-                   const micromesh_tool::ToolMesh& mesh);
+  void addMicromap(meshops::Context                        meshopsContext,
+                   nvvk::ResourceAllocator&                alloc,
+                   VkQueue                                 queue,
+                   uint32_t                                queueFamily,
+                   VkCommandBuffer                         cmd,
+                   uint64_t                                usageFlags,
+                   const microdisp::MicromeshSplitPartsVk& splitParts,
+                   const bary::ContentView&                bary,
+                   const micromesh_tool::ToolMesh&         mesh);
   void addEmpty();
   void deinit(nvvk::ResourceAllocator& alloc);
 

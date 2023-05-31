@@ -173,7 +173,6 @@ bool mergeIntoFirst(tinygltf::Model& a, const tinygltf::Model& b, const std::str
   }
 
   // Lights
-  const size_t lightsOffset = a.lights.size();
   a.lights.insert(a.lights.end(), b.lights.begin(), b.lights.end());
 
   // Cameras
@@ -181,7 +180,6 @@ bool mergeIntoFirst(tinygltf::Model& a, const tinygltf::Model& b, const std::str
   a.cameras.insert(a.cameras.end(), b.cameras.begin(), b.cameras.end());
 
   // Skins and nodes
-  const size_t skinsOffset = a.skins.size();
   const size_t nodesOffset = a.nodes.size();
   for(tinygltf::Skin skin : b.skins)
   {
@@ -205,7 +203,6 @@ bool mergeIntoFirst(tinygltf::Model& a, const tinygltf::Model& b, const std::str
   }
 
   // Animations?
-  const size_t animationOffset = a.animations.size();
   for(tinygltf::Animation animation : b.animations)
   {
     for(tinygltf::AnimationChannel& channel : animation.channels)
@@ -286,9 +283,8 @@ bool toolMerge(const ToolMergeArgs& args, std::unique_ptr<micromesh_tool::ToolSc
   }
 
   // Pack the output back into a ToolScene.
-  scene->destroy();
-  scene = std::make_unique<micromesh_tool::ToolScene>();
-  if(scene->create(std::move(result), "") != micromesh::Result::eSuccess)
+  scene = micromesh_tool::ToolScene::create(std::move(result), "");
+  if(!scene)
   {
     LOGE("Error: Failed to create ToolScene from merged gltf\n");
     return false;

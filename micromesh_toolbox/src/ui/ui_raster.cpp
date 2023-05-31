@@ -112,6 +112,24 @@ bool UiRaster::onUI(ViewerSettings& settings)
       "Ambient Occlusion", [&] { return ImGui::Checkbox("##4", &hbao.active); },
       "Screen-Space Ambient Occlusion (hbao)");
 
+  if(PE::treeNode("Heightmaps"))
+  {
+    ToolboxScene* currentScene = _v->getScene(settings.geometryView.slot);
+    bool hasHeightmaps = currentScene && currentScene->valid() && currentScene->stats() && currentScene->stats()->heightmaps;
+    ImGui::BeginDisabled(!hasHeightmaps);
+    changed |= PE::entry("Heightmap Subdiv", [&]() {
+      return ImGui::SliderInt("Heightmap Subdiv", &settings.heightmapSubdivLevel, 0, HEIGHTMAP_MAX_SUBDIV_LEVEL);
+    });
+    changed |= PE::entry("Heightmap Scale", [&]() {
+      return ImGui::InputFloat("Heightmap Scale", &settings.heightmapScale, 0.01F, 0.1F, "%0.3f");
+    });
+    changed |= PE::entry("Heightmap Offset", [&]() {
+      return ImGui::InputFloat("Heightmap Offset", &settings.heightmapOffset, 0.01F, 0.1F, "%0.3f");
+    });
+    ImGui::EndDisabled();
+    PE::treePop();
+  }
+
   if(PE::treeNode("Extra"))
   {
     // Colormap

@@ -12,6 +12,7 @@
 
 #include <thread>
 
+#include "tool_scene.hpp"
 #include "toolbox_scene.hpp"
 #include "../src/tool_meshops_objects.hpp"
 #include "microutils/microutils.hpp"
@@ -36,6 +37,9 @@
 #include "_autogen/draw_compressed_basic.task.glsl.h"
 #include "_autogen/draw_compressed_basic.mesh.glsl.h"
 #include "_autogen/draw_compressed_basic.frag.glsl.h"
+#include "_autogen/draw_heightmap.task.glsl.h"
+#include "_autogen/draw_heightmap.mesh.glsl.h"
+#include "_autogen/draw_heightmap.frag.glsl.h"
 #include "nvvk/pipeline_vk.hpp"
 #include "nvvk/shaders_vk.hpp"
 
@@ -78,7 +82,6 @@ ToolboxScene::ToolboxScene(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, nvvk::Co
   meshops::meshopsContextCreateVK(config, sharedContextVK, &m_context);
   //  meshops::meshopsContextCreateVK(config, nullptr, nullptr, &m_context);
 
-  m_toolscene    = std::make_unique<micromesh_tool::ToolScene>();
   m_toolsceneVk  = std::make_unique<ToolboxSceneVk>(ctx, alloc, m_context, m_qGCT1);
   m_toolsceneRtx = std::make_unique<ToolboxSceneRtx>(ctx, alloc, compute_family_index);
 
@@ -107,7 +110,7 @@ ToolboxScene::~ToolboxScene()
 
 void ToolboxScene::destroy()
 {
-  m_toolscene->destroy();
+  m_toolscene.reset();
   m_toolsceneVk->destroy();
   m_toolsceneRtx->destroy();
   m_dirty.set();  // Fully dirty
@@ -126,7 +129,7 @@ void ToolboxScene::destroy()
 //--------------------------------------------------------------------------------------------------
 // Creating the scene by loading a file
 //
-void ToolboxScene::createFromFile(const std::string& filename)
+bool ToolboxScene::createFromFile(const std::string& filename)
 {
   nvh::ScopedTimer st("Create From File: ");
 
@@ -134,9 +137,10 @@ void ToolboxScene::createFromFile(const std::string& filename)
   destroy();
 
   // Loading the scene
-  if(m_toolscene->create(filename) != micromesh::Result::eSuccess)
+  m_toolscene = micromesh_tool::ToolScene::create(filename);
+  if(!m_toolscene)
   {
-    return;
+    return false;
   }
 
   // Finding the dimension of the scene
@@ -149,6 +153,8 @@ void ToolboxScene::createFromFile(const std::string& filename)
 
   // Adjusting camera
   setCameraFromScene(m_pathFilename);
+
+  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -160,11 +166,13 @@ void ToolboxScene::createVulkanBuffers()
 {
   nvh::ScopedTimer st("Create Vulkan Buffers\n");
 
-  assert(m_toolscene->valid());
+  assert(m_toolscene);
 
   // Finding the dimension of the scene
   m_scnDimensions = std::make_unique<micromesh_tool::ToolSceneDimensions>(*m_toolscene);
 
+  // Search the scene's materials to see if any have heightmaps applied
+  m_sceneStats = micromesh_tool::ToolSceneStats(*m_toolscene);
 
   {  // Create the Vulkan side of the scene
      // Since we load and display simultaneously, we need to use a second GTC queue
@@ -205,16 +213,49 @@ void ToolboxScene::createSbt(VkPipeline rtPipeline, VkRayTracingPipelineCreateIn
 std::vector<uint32_t> ToolboxScene::getNodes(SceneNodeMethods shading, SceneNodeMicromesh micromesh) const
 {
   std::vector<uint32_t> nodes;  // return a vector of nodes corresponding on the requested values
-  std::bitset<2>        test;
+  std::bitset<3>        value;
+  std::bitset<3>        mask;
+
+  switch(shading)
+  {
+    case SceneNodeMethods::eAll:
+      break;
+    case SceneNodeMethods::eBlend:
+      mask.set(eNodeIsOpaque);
+      break;
+    case SceneNodeMethods::eSolid:
+      mask.set(eNodeIsOpaque);
+      value.set(eNodeIsOpaque);
+      break;
+  }
+  switch(micromesh)
+  {
+    case SceneNodeMicromesh::eMicromeshWith:
+      mask.set(eNodeHasMicromap);
+      value.set(eNodeHasMicromap);
+      break;
+    case SceneNodeMicromesh::eMicromeshWithout:
+      mask.set(eNodeHasMicromap);
+      break;
+    case SceneNodeMicromesh::eMicromeshDontCare:
+      break;
+    case SceneNodeMicromesh::eHeightmapNoMicromesh:
+      mask.set(eNodeHasHeightmap);
+      mask.set(eNodeHasMicromap);
+      value.set(eNodeHasHeightmap);
+      break;
+    case SceneNodeMicromesh::eNoHeightmapNoMicromesh:
+      mask.set(eNodeHasHeightmap);
+      mask.set(eNodeHasMicromap);
+      break;
+    case SceneNodeMicromesh::eNoHeightmapBothMicromesh:
+      mask.set(eNodeHasHeightmap);
+      break;
+  }
 
   for(uint32_t node_id = 0; node_id < m_toolscene->instances().size(); node_id++)
   {
-    // If we don't care about the value, we use the same as the one from the m_shadeNodes
-    test.set(0, shading == SceneNodeMethods::eAll ? m_shadeNodes[node_id][0] : shading == SceneNodeMethods::eSolid);
-    test.set(1, micromesh == SceneNodeMicromesh::eMicromeshDontCare ? m_shadeNodes[node_id][1] :
-                                                                      micromesh == SceneNodeMicromesh::eMicromeshWith);
-
-    if(test == m_shadeNodes[node_id])
+    if((m_shadeNodes[node_id] & mask) == (value & mask))
     {
       nodes.push_back(node_id);
     }
@@ -387,15 +428,15 @@ void ToolboxScene::setCameraFromScene(const std::filesystem::path& filename)
 // Position 1: micromesh
 void ToolboxScene::setShadeNodes()
 {
-  const auto& prim_inst = m_toolscene->instances();
+  const auto& instances = m_toolscene->instances();
   const auto& meshes    = m_toolscene->meshes();
 
-  m_shadeNodes.resize(prim_inst.size());  // Storing the
+  m_shadeNodes.resize(instances.size());  // Storing the
 
-  for(uint32_t node_id = 0; node_id < prim_inst.size(); node_id++)
+  for(uint32_t node_id = 0; node_id < instances.size(); node_id++)
   {
-    const micromesh_tool::ToolScene::PrimitiveInstance& instance   = prim_inst[node_id];
-    uint32_t                                            ref_id     = instance.primMeshRef;
+    const micromesh_tool::ToolScene::Instance&          instance   = instances[node_id];
+    uint32_t                                            ref_id     = instance.mesh;
     const std::unique_ptr<micromesh_tool::ToolMesh>&    mesh       = meshes[ref_id];
     int32_t                                             baryIndex  = mesh->relations().bary;
     int32_t                                             groupIndex = mesh->relations().group;
@@ -413,7 +454,7 @@ void ToolboxScene::setShadeNodes()
           const DeviceMicromap& micromap = micromaps[groupIndex];
           if(micromap.raster())
           {
-            m_shadeNodes[node_id].set(1);
+            m_shadeNodes[node_id].set(eNodeHasMicromap);
           }
         }
       }
@@ -425,7 +466,16 @@ void ToolboxScene::setShadeNodes()
       mat = &m_toolscene->materials()[mat_id];
 
     if(!mat || mat->alphaMode == "OPAQUE")
-      m_shadeNodes[node_id].set(0);
+      m_shadeNodes[node_id].set(eNodeIsOpaque);
+
+    // Find if the material has heightmap displacement
+    float bias;
+    float scale;
+    int   imageIndex;
+    if(m_toolscene->getHeightmap(mat_id, bias, scale, imageIndex))
+    {
+      m_shadeNodes[node_id].set(eNodeHasHeightmap);
+    }
   }
 }
 
@@ -474,6 +524,9 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
                                                  std::end(draw_compressed_basic_mesh_glsl));
   const std::vector<uint32_t> raster_micromesh_f(std::begin(draw_compressed_basic_frag_glsl),
                                                  std::end(draw_compressed_basic_frag_glsl));
+  const std::vector<uint32_t> raster_heightmap_t(std::begin(draw_heightmap_task_glsl), std::end(draw_heightmap_task_glsl));
+  const std::vector<uint32_t> raster_heightmap_m(std::begin(draw_heightmap_mesh_glsl), std::end(draw_heightmap_mesh_glsl));
+  const std::vector<uint32_t> raster_heightmap_f(std::begin(draw_heightmap_frag_glsl), std::end(draw_heightmap_frag_glsl));
 
 #ifdef USE_NSIGHT_AFTERMATH
   g_aftermathTracker->addShaderBinary(raster_v);
@@ -486,6 +539,9 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
   g_aftermathTracker->addShaderBinary(raster_micromesh_t);
   g_aftermathTracker->addShaderBinary(raster_micromesh_m);
   g_aftermathTracker->addShaderBinary(raster_micromesh_f);
+  g_aftermathTracker->addShaderBinary(raster_heightmap_t);
+  g_aftermathTracker->addShaderBinary(raster_heightmap_m);
+  g_aftermathTracker->addShaderBinary(raster_heightmap_f);
 #endif  // USE_NSIGHT_AFTERMATH
 
   //VkFormat color_format = m_gBuffers->getColorFormat(eResult);  // Using the RGBA32F
@@ -543,6 +599,18 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
     m_dutil->DBG_NAME(m_rasterPipe.plines[RasterPipelines::eRasterPipelineMicromeshSolid]);
   }
 
+  // Heightmap
+  {
+    gpb.clearShaders();
+    gpb.clearAttributeDescriptions();  // No need and avoid calling vkCmdBindVertexBuffers
+    gpb.clearBindingDescriptions();
+    gpb.rasterizationState.cullMode = settings.forceDoubleSided ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+    gpb.addShader(raster_heightmap_t, VK_SHADER_STAGE_TASK_BIT_NV).pSpecializationInfo = specialization.getSpecialization();
+    gpb.addShader(raster_heightmap_m, VK_SHADER_STAGE_MESH_BIT_NV).pSpecializationInfo = specialization.getSpecialization();
+    gpb.addShader(raster_heightmap_f, VK_SHADER_STAGE_FRAGMENT_BIT).pSpecializationInfo = specialization.getSpecialization();
+    m_rasterPipe.plines[RasterPipelines::eRasterPipelineHeightmapSolid] = gpb.createPipeline();
+    m_dutil->DBG_NAME(m_rasterPipe.plines[RasterPipelines::eRasterPipelineHeightmapSolid]);
+  }
 
   // Overlays
   {
@@ -587,6 +655,16 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
     gpb.addShader(overlay_f, VK_SHADER_STAGE_FRAGMENT_BIT);
     m_rasterPipe.plines[RasterPipelines::eRasterPipelineMicromeshWire] = gpb.createPipeline();
     m_dutil->DBG_NAME(m_rasterPipe.plines[RasterPipelines::eRasterPipelineMicromeshWire]);
+
+    // Heightmap-wireframe
+    gpb.clearShaders();
+    gpb.clearAttributeDescriptions();  // No need and avoid calling vkCmdBindVertexBuffers
+    gpb.clearBindingDescriptions();
+    gpb.addShader(raster_heightmap_t, VK_SHADER_STAGE_TASK_BIT_NV).pSpecializationInfo = specialization.getSpecialization();
+    gpb.addShader(raster_heightmap_m, VK_SHADER_STAGE_MESH_BIT_NV).pSpecializationInfo = specialization.getSpecialization();
+    gpb.addShader(overlay_f, VK_SHADER_STAGE_FRAGMENT_BIT);
+    m_rasterPipe.plines[RasterPipelines::eRasterPipelineHeightmapWire] = gpb.createPipeline();
+    m_dutil->DBG_NAME(m_rasterPipe.plines[RasterPipelines::eRasterPipelineHeightmapWire]);
   }
 
   resetDirty(SceneDirtyFlags::eRasterPipeline);

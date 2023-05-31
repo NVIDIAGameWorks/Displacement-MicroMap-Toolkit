@@ -121,6 +121,16 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpGenerateSubdivisionLevel(Con
     arrayInfoTypedFromView(opInput.meshTriangleVertices, modified.meshView.triangleVertices);
     if(input.useTextureArea)
     {
+      if(modified.meshView.vertexTexcoords0.empty())
+      {
+        MESHOPS_LOGE(context, "useTextureArea is set but meshView.vertexTexcoords0 is empty");
+        return micromesh::Result::eInvalidValue;
+      }
+      if(input.textureWidth == 0 || input.textureHeight == 0)
+      {
+        MESHOPS_LOGE(context, "useTextureArea requires non-zero textureWidth and textureHeight");
+        return micromesh::Result::eInvalidValue;
+      }
       arrayInfoTypedFromView(opInput.meshVertexTexcoords, modified.meshView.vertexTexcoords0);
     }
     else
@@ -132,10 +142,8 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpGenerateSubdivisionLevel(Con
     arrayInfoTypedFromView(opOutput.meshTriangleSubdivLevels, modified.meshView.triangleSubdivisionLevels);
 
     micromesh::Result result = micromesh::micromeshOpAdaptiveSubdivision(context->m_micromeshContext, &opInput, &opOutput);
-
     if(result != micromesh::Result::eSuccess)
     {
-      assert(0);
       return result;
     }
 

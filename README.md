@@ -3,6 +3,10 @@
 This toolkit provides libraries, samples and tools to create and view displaced micromeshes.
 It is a work in progress and feedback is welcome!
 
+The latest driver exposing `VK_NV_displacement_micromap` is required to
+raytrace micromeshes, such as the *Vulkan Beta Driver* available at
+https://developer.nvidia.com/vulkan-driver.
+
 We recommend to check the [Micro-Mesh Basics
 slides](https://developer.download.nvidia.com/ProGraphics/nvpro-samples/slides/Micro-Mesh_Basics.pdf)
 first as well as the [`dmm_displacement`
@@ -153,8 +157,8 @@ This `meshops` layer is still a bit work in progress as we are migrating additio
 ### **tools & libraries**
 
 All tools operate on glTF 2.0 files and do support additional micromap specific
-glTF extensions from NVIDIA. The spcifications are available at
-<https://github.com/NeilBickford-NV/glTF/tree/micro-mesh/extensions/2.0/Vendor>.
+glTF extensions from NVIDIA. The specifications are available at
+<https://github.com/KhronosGroup/glTF/pull/2273>.
 
 All micromap data is stored as `.bary` files which is a new container / file
 format that was specifically designed to allow direct storage of data consumed
@@ -261,6 +265,17 @@ We describe the core steps that would be performed to create a micromesh asset
 from an original input mesh in the [Micro-Mesh Asset Pipeline
 slide-deck](https://developer.download.nvidia.com/ProGraphics/nvpro-samples/slides/Micro-Mesh_Asset_Pipeline.pdf)
 as well as in [docs/asset_pipeline.md](docs/asset_pipeline.md)
+
+## About the Latest Release (1.1)
+
+- Heightmap rendering in micromesh_toolkit with dynamic LOD
+- Memory estimate for baking high resolution heightmaps in batches
+- Micromesh USD schema definitions and libusd API
+- meshopsOpApplyBounds() to apply (and discard) direction bounds to positions and directions
+- Better glTF instancing/node hierarchy support for baking whole scenes
+- Fixes for image filename generation when resampling
+- Avoid leaving unused and empty glTF extension references
+- Fix matching regular texture names in automation/link_heightmaps.py
 
 ## Third-Party Licenses
 
