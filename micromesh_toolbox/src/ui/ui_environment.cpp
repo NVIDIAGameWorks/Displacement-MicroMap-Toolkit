@@ -11,7 +11,7 @@
  */
 
 #include "ui_environment.hpp"
-#include "imgui_helper.h"
+#include "imgui/imgui_helper.h"
 #include "nvvkhl/hdr_env.hpp"
 #include "nvvkhl/sky.hpp"
 #include "toolbox_viewer.hpp"

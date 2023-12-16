@@ -62,7 +62,7 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
                                                 micromesh::OpContext                              ctx,
                                                 const micromesh::OpCompressDisplacement_settings& settings,
                                                 const micromesh::MeshTopology&                    meshTopo,
-                                                const micromesh::Micromap&                        uncompressedMap,
+                                                const micromesh::MicromapGeneric&                 uncompressedMap,
                                                 const micromesh::ArrayInfo& uncompressedTriangleMinMaxs,
                                                 // meshMinMaxs optional for floats
                                                 const float* meshMinMaxs = nullptr,

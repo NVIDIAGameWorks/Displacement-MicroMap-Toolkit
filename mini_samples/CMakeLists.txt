@@ -19,7 +19,7 @@ function(DefaultBasicMakefile)
     target_include_directories(${PROJECT_NAME} PRIVATE ${SAMPLES_COMMON_DIR})
 
     # Linking with other libraries
-    target_link_libraries (${PROJECT_NAME} ${PLATFORM_LIBRARIES})
+    target_link_libraries (${PROJECT_NAME} ${PLATFORM_LIBRARIES} ${LIBRARIES_OPTIMIZED})
     target_link_libraries (${PROJECT_NAME} nvpro_core)
 
     # Compile definitions

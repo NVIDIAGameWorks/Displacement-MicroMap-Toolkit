@@ -37,7 +37,7 @@
 
 namespace meshops {
 
-using namespace glsl_shared;
+using namespace shaders;
 
 static bool getGlobalMinMax(ArrayView<const nvmath::vec2f> minMaxs, nvmath::vec2f& globalMinMax, bool filterZeroToOne, const uint32_t maxFilterWarnings);
 
@@ -215,7 +215,7 @@ uint64_t BakerVK::estimateBaseGpuMemory(uint64_t distances, uint64_t triangles, 
   // Persistent gpu memory used between batches
   uint64_t result = 0;
   result += nvh::align_up(sizeof(float) * distances, alignment);                  // m_distanceBuf
-  result += nvh::align_up(sizeof(glsl_shared::Triangle) * triangles, alignment);  // m_trianglesBuf
+  result += nvh::align_up(sizeof(shaders::Triangle) * triangles, alignment);      // m_trianglesBuf
   result += nvh::align_up(sizeof(nvmath::vec2f) * triangles, alignment);          // m_triangleMinMaxBuf
   result += BakerMeshVK::estimateGpuMemory(triangles, vertices, requireDirectionBounds);
 
@@ -820,9 +820,9 @@ uint64_t BakerMeshVK::estimateGpuMemory(uint64_t triangles, uint64_t vertices, b
 
   // Buffers allocated in create() and createTessellated()
   uint64_t result = 0;
-  result += nvh::align_up(sizeof(glsl_shared::CompressedVertex) * vertices, alignment);  // vertices - raw position and compressed attributes
+  result += nvh::align_up(sizeof(shaders::CompressedVertex) * vertices, alignment);  // vertices - raw position and compressed attributes
   result += nvh::align_up(sizeof(nvmath::vec3ui) * triangles, alignment);  // indices
-  result += nvh::align_up(sizeof(glsl_shared::BakerMeshInfo), alignment);
+  result += nvh::align_up(sizeof(shaders::BakerMeshInfo), alignment);
   if(requireDirectionBounds)
   {
     result += nvh::align_up(sizeof(nvmath::vec2f) * vertices, alignment);  // directionBoundsBuf
@@ -983,7 +983,7 @@ void ResamplerPipeline::destroy(VkDevice device)
 //--------------------------------------------------------------------------------------------------
 //
 //
-void BakerPipeline::run(meshops::ContextVK& vk, const meshops::OpBake_input& input, glsl_shared::BakerPushConstants& pushConstants, bool finalBatch)
+void BakerPipeline::run(meshops::ContextVK& vk, const meshops::OpBake_input& input, shaders::BakerPushConstants& pushConstants, bool finalBatch)
 {
   nvh::ScopedTimer t("Run Compute Pass");
 
@@ -1023,11 +1023,11 @@ void BakerPipeline::run(meshops::ContextVK& vk, const meshops::OpBake_input& inp
   vk.resAllocator->finalizeAndReleaseStaging();
 }
 
-void ResamplerPipeline::run(meshops::ContextVK&              vk,
-                            const meshops::OpBake_input&     input,
-                            ArrayView<meshops::Texture>      outputTextures,
-                            glsl_shared::BakerPushConstants& pushConstants,
-                            nvvk::Buffer&                    triangleMinMaxBuf)
+void ResamplerPipeline::run(meshops::ContextVK&          vk,
+                            const meshops::OpBake_input& input,
+                            ArrayView<meshops::Texture>  outputTextures,
+                            shaders::BakerPushConstants& pushConstants,
+                            nvvk::Buffer&                triangleMinMaxBuf)
 {
   nvh::ScopedTimer t("Run Resampler");
   assert(outputTextures.size());
@@ -1062,21 +1062,38 @@ void ResamplerPipeline::run(meshops::ContextVK&              vk,
     generatingHeightmap = generatingHeightmap || input.resamplerInput[i].textureType == TextureType::eHeightMap;
   }
 
-  // If we're generating a heightmap during resampling, we should scale the
-  // output by the bounds. This would need a second pass to first compute the
-  // values we would write. Instead, we can approximate the bounds by using the
-  // already-computed micromesh displacement values. These do get computed in
-  // meshops_bake.cpp, but this operation is not that common anyway.
+  // Heightmap generation is a byproduct and intended for use with the input
+  // base mesh (i.e. the micromap displaced output would be discarded). If we're
+  // generating a heightmap during resampling, we should scale the output by the
+  // bounds. This would need a second pass to first compute the values we would
+  // write. Instead, we can approximate the bounds by using the already-computed
+  // micromesh displacement values. These do get computed in meshops_bake.cpp,
+  // but this operation is not that common anyway.
   pushConstants.globalMinMax = nvmath::vec2f(0.0f, 1.0f);
   if(generatingHeightmap)
   {
+    // Ignore the top and bottom 1% heights when choosing a heightmap scale.
     auto minMaxs =
         ArrayView(static_cast<nvmath::vec2f*>(vk.resAllocator->map(triangleMinMaxBuf)), input.baseMeshView.triangleCount());
-    if(!getGlobalMinMax(minMaxs, pushConstants.globalMinMax, false, 0))
-    {
-      pushConstants.globalMinMax = {0.0f, 1.0f};
-    }
+    auto               minMaxFloatsView = ArrayView<float>(minMaxs);
+    std::vector<float> minMaxFloats(minMaxFloatsView.begin(), minMaxFloatsView.end());
+    std::sort(minMaxFloats.begin(), minMaxFloats.end());
+    size_t ignoreOutliers        = minMaxFloats.size() / 100;
+    pushConstants.globalMinMax.x = minMaxFloats[ignoreOutliers];
+    pushConstants.globalMinMax.y = minMaxFloats[minMaxFloats.size() - 1 - ignoreOutliers];
     vk.resAllocator->unmap(triangleMinMaxBuf);
+
+    // Print the scale - currently this is the only output the user has
+    auto globalBiasScale = BiasScalef::minmax_unit(pushConstants.globalMinMax);
+    LOGW("\nHeightmap range: [%f, %f] (bias %f, scale %f)\n", pushConstants.globalMinMax.x,
+         pushConstants.globalMinMax.y, globalBiasScale.bias, globalBiasScale.scale);
+    if(input.settings.fitDirectionBounds)
+    {
+      // When direction bounds are non-uniform, the direction vectors change.
+      // Even if the height values were rescaled, they will not work with the
+      // original mesh.
+      LOGW("Warning: heightmap will not work with the original base mesh due to --fit-direction-bounds\n");
+    }
   }
 
   // Create a list of resolutions. Each geometry instance will be rasterized at

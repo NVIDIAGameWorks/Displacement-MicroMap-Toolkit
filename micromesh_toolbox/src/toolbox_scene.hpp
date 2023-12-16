@@ -63,9 +63,9 @@ public:
   void destroy();
 
   // Resource creations
-  void createRtxAccelerations(bool useMicroMesh);
+  void createRtxAccelerations(const ViewerSettings& settings);
   void createVulkanBuffers();
-  void createRtxPipeline(const std::vector<VkDescriptorSetLayout> extraLayouts);
+  void createRtxPipeline(const ViewerSettings& settings, const std::vector<VkDescriptorSetLayout> extraLayouts);
   void createRasterPipeline(const ViewerSettings&                    settings,
                             const std::vector<VkDescriptorSetLayout> extraLayouts,
                             VkFormat                                 colorFormat,

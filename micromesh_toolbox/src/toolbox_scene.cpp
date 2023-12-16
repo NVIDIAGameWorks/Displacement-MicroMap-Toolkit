@@ -63,7 +63,6 @@ ToolboxScene::ToolboxScene(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, nvvk::Co
   const uint32_t compute_family_index = ctx->m_queueC.familyIndex;
 
   m_sbt      = std::make_unique<nvvk::SBTWrapper>();                      // Shader Binding Table
-  m_rtxSet   = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // DescSet with TLAS
   m_sceneSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // DescSet of the Scene
   m_dutil    = std::make_unique<nvvk::DebugUtil>(m_device);               // Debug utility
 
@@ -122,8 +121,8 @@ void ToolboxScene::destroy()
 
   freeRecordCommandBuffer();
   m_sbt->destroy();
-  m_rtxSet->deinit();
-  m_sceneSet->deinit();
+  m_rtxSet.reset();
+  m_sceneSet.reset();
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -279,11 +278,11 @@ void ToolboxScene::writeSets(VkDescriptorImageInfo& outImage, VkDescriptorBuffer
 // Create the RTX acceleration structure using the toolscene and the Vulkan buffer information
 // Will be called if eDescriptorSets is dirty
 //
-void ToolboxScene::createRtxAccelerations(bool useMicroMesh)
+void ToolboxScene::createRtxAccelerations(const ViewerSettings& settings)
 {
   bool hasDisplacementMicromeshExt = m_ctx->hasDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME);
 
-  m_toolsceneRtx->create(m_toolscene, m_toolsceneVk, useMicroMesh && hasDisplacementMicromeshExt);  // Create BLAS / TLAS
+  m_toolsceneRtx->create(settings, m_toolscene, m_toolsceneVk, hasDisplacementMicromeshExt);  // Create BLAS / TLAS
   resetDirty(SceneDirtyFlags::eRtxAccelerations);
 
   // When the acceleration structure is created the descriptor sets
@@ -296,7 +295,7 @@ void ToolboxScene::createRtxAccelerations(bool useMicroMesh)
 //
 void ToolboxScene::createRtxSet()
 {
-  m_rtxSet->deinit();
+  m_rtxSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // DescSet with TLAS
 
   // This descriptor set, holds the top level acceleration structure and the output image
   m_rtxSet->addBinding(RtxBindings::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_ALL);
@@ -312,7 +311,7 @@ void ToolboxScene::createRtxSet()
 //
 void ToolboxScene::createSceneSet()
 {
-  m_sceneSet->deinit();
+  m_sceneSet = std::make_unique<nvvk::DescriptorSetContainer>(m_device);  // DescSet of the Scene
 
   // This descriptor set, holds scene information and the textures
   m_sceneSet->addBinding(SceneBindings::eFrameInfo, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL);
@@ -502,7 +501,7 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
   layouts.insert(layouts.end(), extraLayouts.begin(), extraLayouts.end());
 
   VkShaderStageFlags stages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_TASK_BIT_NV | VK_SHADER_STAGE_MESH_BIT_NV;
-  const VkPushConstantRange  push_constant_ranges = {stages, 0, sizeof(PushConstant)};
+  const VkPushConstantRange push_constant_ranges = {stages, 0, sizeof(shaders::PushConstant)};
   VkPipelineLayoutCreateInfo create_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   create_info.setLayoutCount         = static_cast<uint32_t>(layouts.size());
   create_info.pSetLayouts            = layouts.data();
@@ -556,7 +555,7 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
   gpb.createInfo.pNext = &rf_info;
 
   {
-    gpb.addBindingDescriptions({{0, sizeof(vec4)}});
+    gpb.addBindingDescriptions({{0, sizeof(nvmath::vec4f)}});
     gpb.addAttributeDescriptions({{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}});
 
     // Solid
@@ -617,7 +616,7 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
     gpb.rasterizationState.cullMode = VK_CULL_MODE_NONE;
 
     // Add description back, removed for micromesh
-    gpb.addBindingDescriptions({{0, sizeof(vec4)}});
+    gpb.addBindingDescriptions({{0, sizeof(nvmath::vec4f)}});
     gpb.addAttributeDescriptions({{0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0}});
 
     gpb.rasterizationState.depthBiasEnable = VK_FALSE;
@@ -674,12 +673,15 @@ void ToolboxScene::createRasterPipeline(const ViewerSettings&                   
 //--------------------------------------------------------------------------------------------------
 // Creating the pipeline for the ray tracer: all shaders, raygen, chit, miss
 //
-void ToolboxScene::createRtxPipeline(const std::vector<VkDescriptorSetLayout> extraLayouts)
+void ToolboxScene::createRtxPipeline(const ViewerSettings& settings, const std::vector<VkDescriptorSetLayout> extraLayouts)
 {
   auto scope_t = nvh::ScopedTimer("createRtxPipeline\n");
 
   m_rtxPipe.destroy(m_device);
   m_rtxPipe.plines.resize(1);
+
+  nvvk::Specialization specialization;
+  specialization.add(0, settings.shading);  // Adding shading method to constant_id=0
 
   // Creating all shaders
   enum StageIndices
@@ -706,7 +708,8 @@ void ToolboxScene::createRtxPipeline(const std::vector<VkDescriptorSetLayout> ex
 
   std::array<VkPipelineShaderStageCreateInfo, eShaderGroupCount> stages{};
   VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-  stage.pName = "main";  // All the same entry point
+  stage.pName               = "main";  // All the same entry point
+  stage.pSpecializationInfo = specialization.getSpecialization();
   // Raygen
   stage.module    = nvvk::createShaderModule(m_device, rgen);
   stage.stage     = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
@@ -754,7 +757,7 @@ void ToolboxScene::createRtxPipeline(const std::vector<VkDescriptorSetLayout> ex
   shader_groups.push_back(group);
 
   // Push constant: we want to be able to update constants used by the shaders
-  const VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(PushConstant)};
+  const VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(shaders::PushConstant)};
 
   VkPipelineLayoutCreateInfo pipeline_layout_create_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   pipeline_layout_create_info.pushConstantRangeCount = 1;
@@ -777,7 +780,7 @@ void ToolboxScene::createRtxPipeline(const std::vector<VkDescriptorSetLayout> ex
   ray_pipeline_info.pGroups                      = shader_groups.data();
   ray_pipeline_info.maxPipelineRayRecursionDepth = 2;  // Ray depth
   ray_pipeline_info.layout                       = m_rtxPipe.layout;
-  ray_pipeline_info.flags = m_toolsceneVk->hasRtxMicromesh() ? VK_PIPELINE_CREATE_RAY_TRACING_DISPLACEMENT_MICROMAP_BIT_NV : 0;
+  ray_pipeline_info.flags = m_toolsceneVk->hasRtxMicromeshExt() ? VK_PIPELINE_CREATE_RAY_TRACING_DISPLACEMENT_MICROMAP_BIT_NV : 0;
   vkCreateRayTracingPipelinesKHR(m_device, {}, {}, 1, &ray_pipeline_info, nullptr, (m_rtxPipe.plines).data());
   m_dutil->DBG_NAME(m_rtxPipe.plines[0]);
 

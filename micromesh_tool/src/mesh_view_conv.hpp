@@ -119,11 +119,12 @@ meshops::MeshView makeMeshView(const tinygltf::Model&     model,
 inline meshops::MutableMeshView makeMeshView(nvh::GltfScene& gltfScene)
 {
   meshops::MutableMeshView result;
-  result.triangleVertices = meshops::ArrayView<nvmath::vec3ui>(meshops::ArrayView(gltfScene.m_indices));
-  result.vertexPositions  = gltfScene.m_positions;
-  result.vertexNormals    = gltfScene.m_normals;
-  result.vertexTexcoords0 = gltfScene.m_texcoords0;
-  result.vertexTangents   = gltfScene.m_tangents;
+  // Two constructors for an explicit cast from glm to nvmath
+  result.triangleVertices = meshops::ArrayView<nvmath::vec3ui>(meshops::ArrayView<uint32_t>(gltfScene.m_indices));
+  result.vertexPositions  = meshops::ArrayView<nvmath::vec3f>(meshops::ArrayView<glm::vec3>(gltfScene.m_positions));
+  result.vertexNormals    = meshops::ArrayView<nvmath::vec3f>(meshops::ArrayView<glm::vec3>(gltfScene.m_normals));
+  result.vertexTexcoords0 = meshops::ArrayView<nvmath::vec2f>(meshops::ArrayView<glm::vec2>(gltfScene.m_texcoords0));
+  result.vertexTangents   = meshops::ArrayView<nvmath::vec4f>(meshops::ArrayView<glm::vec4>(gltfScene.m_tangents));
   assert(result.consistent());
   return result;
 }
@@ -131,11 +132,12 @@ inline meshops::MutableMeshView makeMeshView(nvh::GltfScene& gltfScene)
 inline meshops::MeshView makeMeshView(const nvh::GltfScene& gltfScene)
 {
   meshops::MeshView result;
-  result.triangleVertices = meshops::ArrayView<const nvmath::vec3ui>(meshops::ArrayView(gltfScene.m_indices));
-  result.vertexPositions  = gltfScene.m_positions;
-  result.vertexNormals    = gltfScene.m_normals;
-  result.vertexTexcoords0 = gltfScene.m_texcoords0;
-  result.vertexTangents   = gltfScene.m_tangents;
+  // Two constructors for an explicit cast from glm to nvmath
+  result.triangleVertices = meshops::ArrayView<const nvmath::vec3ui>(meshops::ArrayView<const uint32_t>(gltfScene.m_indices));
+  result.vertexPositions = meshops::ArrayView<const nvmath::vec3f>(meshops::ArrayView<const glm::vec3>(gltfScene.m_positions));
+  result.vertexNormals = meshops::ArrayView<const nvmath::vec3f>(meshops::ArrayView<const glm::vec3>(gltfScene.m_normals));
+  result.vertexTexcoords0 = meshops::ArrayView<const nvmath::vec2f>(meshops::ArrayView<const glm::vec2>(gltfScene.m_texcoords0));
+  result.vertexTangents = meshops::ArrayView<const nvmath::vec4f>(meshops::ArrayView<const glm::vec4>(gltfScene.m_tangents));
   assert(result.consistent());
   return result;
 }
@@ -143,11 +145,13 @@ inline meshops::MeshView makeMeshView(const nvh::GltfScene& gltfScene)
 inline meshops::DynamicMeshView makeDynamicMeshView(nvh::GltfScene& gltfScene)
 {
   meshops::DynamicMeshView result;
+  // Two constructors for an explicit cast from glm to nvmath
   result.triangleVertices = meshops::DynamicArrayView<nvmath::vec3ui>(meshops::DynamicArrayView<uint32_t>(gltfScene.m_indices));
-  result.vertexPositions  = gltfScene.m_positions;
-  result.vertexNormals    = gltfScene.m_normals;
-  result.vertexTexcoords0 = gltfScene.m_texcoords0;
-  result.vertexTangents   = gltfScene.m_tangents;
+  result.vertexPositions = meshops::DynamicArrayView<nvmath::vec3f>(meshops::DynamicArrayView<glm::vec3>(gltfScene.m_positions));
+  result.vertexNormals = meshops::DynamicArrayView<nvmath::vec3f>(meshops::DynamicArrayView<glm::vec3>(gltfScene.m_normals));
+  result.vertexTexcoords0 =
+      meshops::DynamicArrayView<nvmath::vec2f>(meshops::DynamicArrayView<glm::vec2>(gltfScene.m_texcoords0));
+  result.vertexTangents = meshops::DynamicArrayView<nvmath::vec4f>(meshops::DynamicArrayView<glm::vec4>(gltfScene.m_tangents));
   assert(result.consistent());
   return result;
 }

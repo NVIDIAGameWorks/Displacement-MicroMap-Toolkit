@@ -57,8 +57,7 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpCompressDisplacementMicromap
       microutils::baryMiscDataUncompressedMipInit(*output.compressedDisplacementRasterMips);
     }
 
-    micromesh::Micromap  inputMap;
-    micromesh::ArrayInfo inputMinMaxs;
+    micromesh::ArrayInfo uncompressedMinMaxs;
 
     micromesh::MicromapGeneric uncompressedMap;
     bary::Result baryResult = microutils::baryBasicViewToMicromap(basicUncompressed, groupIdx, uncompressedMap);
@@ -68,21 +67,18 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpCompressDisplacementMicromap
       return micromesh::Result::eFailure;
     }
 
-    if(uncompressedMap.type != micromesh::MicromapType::eUncompressed)
-    {
-      // don't bother with packed for now
-      // complicates a few things
-      return micromesh::Result::eFailure;
-    }
-
-    baryResult = microutils::baryBasicViewToMinMaxs(basicUncompressed, groupIdx, inputMinMaxs);
-    if(baryResult != bary::Result::eSuccess)
+    if(uncompressedMap.type == micromesh::MicromapType::eCompressed)
     {
       assert(0);
       return micromesh::Result::eFailure;
     }
 
-    inputMap = uncompressedMap.uncompressed;
+    baryResult = microutils::baryBasicViewToMinMaxs(basicUncompressed, groupIdx, uncompressedMinMaxs);
+    if(baryResult != bary::Result::eSuccess)
+    {
+      assert(0);
+      return micromesh::Result::eFailure;
+    }
 
     // use magnitude of direction vector to help drive compression heuristic
     std::vector<float>         vtxImportance(input.meshView.vertexCount());
@@ -121,8 +117,8 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpCompressDisplacementMicromap
     mipSettings.skipBlockFormatBits = (1u << uint32_t(micromesh::BlockFormatDispC1::eR11_unorm_lvl3_pack512));
 
     result = microutils::baryBasicDataCompressedAppend(dataCompressed, context->m_micromeshContext, input.settings,
-                                                       *input.meshTopology, inputMap, inputMinMaxs, nullptr, &perVertexImportance,
-                                                       output.compressedDisplacementRasterMips, &mipSettings);
+                                                       *input.meshTopology, uncompressedMap, uncompressedMinMaxs, nullptr,
+                                                       &perVertexImportance, output.compressedDisplacementRasterMips, &mipSettings);
     if(result != micromesh::Result::eSuccess)
     {
       assert(0);

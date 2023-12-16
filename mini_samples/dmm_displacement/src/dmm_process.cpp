@@ -153,7 +153,7 @@ void MicromapProcess::createMicromapBuffers(VkCommandBuffer cmd, const nvh::Prim
   m_alloc->destroy(m_displacementDirections);
   m_alloc->destroy(m_displacementBiasAndScale);
 
-  auto num_tri = static_cast<uint32_t>(mesh.indices.size() / 3U);
+  auto num_tri = static_cast<uint32_t>(mesh.triangles.size());
 
   // Direction vectors
   {
@@ -235,7 +235,7 @@ MicromapProcess::MicroDistances MicromapProcess::createDisplacements(const nvh::
   MicroDistances displacements;  // Result: displacement values for all triangles
 
 
-  auto num_tri = static_cast<uint32_t>(mesh.indices.size() / 3);
+  auto num_tri = static_cast<uint32_t>(mesh.triangles.size());
   displacements.rawTriangles.resize(num_tri);
 
   // Find the distances in parallel
@@ -244,9 +244,9 @@ MicromapProcess::MicroDistances MicromapProcess::createDisplacements(const nvh::
       num_tri,
       [&](uint64_t tri_index) {
         // Retrieve the UV of the triangle
-        nvmath::vec2f t0 = mesh.vertices[mesh.indices[tri_index * 3 + 0]].t;
-        nvmath::vec2f t1 = mesh.vertices[mesh.indices[tri_index * 3 + 1]].t;
-        nvmath::vec2f t2 = mesh.vertices[mesh.indices[tri_index * 3 + 2]].t;
+        nvmath::vec2f t0 = mesh.vertices[mesh.triangles[tri_index].v.x].t;
+        nvmath::vec2f t1 = mesh.vertices[mesh.triangles[tri_index].v.y].t;
+        nvmath::vec2f t2 = mesh.vertices[mesh.triangles[tri_index].v.z].t;
 
         // Working on this triangle
         uint32_t     num_sub_vertices = micromesh::subdivLevelGetVertexCount(subdivLevel);
@@ -303,9 +303,9 @@ MicromapProcess::MicromapData MicromapProcess::prepareData(const nvh::PrimitiveM
   micromesh::ScopedOpContext         ctx{};
   [[maybe_unused]] micromesh::Result result{};
   meshops::MeshTopologyData          topodata{};
-  result = topodata.buildFindingWatertightIndices(ctx, mesh.indices.size(), mesh.indices.data(), mesh.vertices.size(),
-                                                  reinterpret_cast<const micromesh::Vector_float_3*>(&mesh.vertices[0].p),
-                                                  sizeof(nvh::PrimitiveVertex));
+  result = topodata.buildFindingWatertightIndices(
+      ctx, mesh.triangles.size() * 3, reinterpret_cast<const uint32_t*>(mesh.triangles.data()), mesh.vertices.size(),
+      reinterpret_cast<const micromesh::Vector_float_3*>(&mesh.vertices[0].p), sizeof(nvh::PrimitiveVertex));
   assert(result == micromesh::Result::eSuccess);
 
 

@@ -10,7 +10,6 @@
  * its affiliates is strictly prohibited.
  */
 
-
 #version 460
 #extension GL_EXT_ray_tracing : require
 #extension GL_EXT_nonuniform_qualifier : enable
@@ -18,12 +17,12 @@
 #extension GL_GOOGLE_include_directive : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
+#extension GL_NV_displacement_micromap : require
 
 #include "device_host.h"
 #include "dh_bindings.h"
 #include "payload.glsl"
 #include "dh_scn_desc.h"
-
 
 hitAttributeEXT vec2 attribs;
 
@@ -37,21 +36,10 @@ layout(buffer_reference, scalar) readonly buffer Indices { uvec3 i[]; };
 layout(buffer_reference, scalar) readonly buffer DeviceMeshInfos { DeviceMeshInfo i[]; };
 
 layout(set = 1, binding = eSceneDesc) readonly buffer SceneDesc_ { SceneDescription sceneDesc; };
-  // clang-format on
-
+// clang-format on
 
 #include "nvvkhl/shaders/func.glsl"
 #include "get_hit.glsl"
-
-
-layout(constant_id = 0) const int USE_SER = 0;
-
-// Note: At the time of writing `VK_NV_displacement_micromap` is in beta still,
-// meaning the extension is subject to changes. Do not use this in production
-// code! There will be intrinsics to query the microtriangle’s vertex positions,
-// which can be used to find the geometric normal
-#define gl_HitKindFrontFacingMicroTriangleNV 222
-#define gl_HitKindBackFacingMicroTriangleNV 223
 
 //-----------------------------------------------------------------------
 //-----------------------------------------------------------------------
@@ -69,10 +57,18 @@ void main()
   bool frontFacing  = gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT || gl_HitKindEXT == gl_HitKindFrontFacingMicroTriangleNV;
   payload.hit       = getHitState(pinfo, barycentrics, gl_PrimitiveID, gl_ObjectToWorldEXT, gl_WorldToObjectEXT,
                                   gl_WorldRayDirectionEXT, frontFacing);
+  payload.micromesh = false;
 
   // Replace the interpolated base triangle position with the ray hit position for microtriangles
   if(gl_HitKindEXT == gl_HitKindFrontFacingMicroTriangleNV || gl_HitKindEXT == gl_HitKindBackFacingMicroTriangleNV)
   {
-    payload.hit.pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    payload.micromesh = true;
+    payload.hit.pos   = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    payload.hit.geonrm = normalize(cross(gl_HitMicroTriangleVertexPositionsNV[2] - gl_HitMicroTriangleVertexPositionsNV[0],
+                                         gl_HitMicroTriangleVertexPositionsNV[2] - gl_HitMicroTriangleVertexPositionsNV[1]));
+    if(!frontFacing)
+    {
+      payload.hit.geonrm = -payload.hit.geonrm;
+    }
   }
 }

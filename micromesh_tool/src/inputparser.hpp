@@ -12,6 +12,7 @@
 
 #pragma once
 #include <iostream>
+#include <nvmath/nvmath_types.h>
 #include <string>
 #include <variant>
 #include <vector>
@@ -22,6 +23,28 @@
 
 
 static constexpr int MAX_LINE_WIDTH = 60;
+
+namespace CommandLineParserConverters {
+// For a nvmath::vec2i, split dimensions with 'x'
+inline std::istream& operator>>(std::istream& stream, nvmath::vec2i& result)
+{
+  result = {0, 0};
+  std::string token;
+  int         i;
+  for(i = 0; i < 2 && std::getline(stream, token, 'x'); ++i)
+  {
+    try
+    {
+      result[i] = std::stoi(token);
+    }
+    catch(std::invalid_argument e)
+    {
+      // ignore failures and leave zero initialized
+    }
+  }
+  return stream;
+}
+}  // namespace CommandLineParserConverters
 
 //--------------------------------------------------------------------------------------------------
 // Command line parser.
@@ -40,7 +63,7 @@ public:
   // with a std::stringstream. This std::variant can be easily extended if
   // the stream operator>> is overloaded. If not, you have to add a special
   // case to the parse() method.
-  using Value = std::variant<int32_t*, uint32_t*, double*, float*, bool*, std::string*>;
+  using Value = std::variant<int32_t*, uint32_t*, double*, float*, bool*, std::string*, nvmath::vec2i*>;
 
   // The description is printed as part of the help message.
   CommandLineParser(const std::string& description)
@@ -112,7 +135,6 @@ public:
     }
   }
 
-
   // The command line arguments are traversed from start to end. That means,
   // if an option is set multiple times, the last will be the one which is
   // finally used. This call will throw a std::runtime_error if a value is
@@ -182,6 +204,7 @@ public:
             std::visit(
                 [&value](auto&& arg) {
                   std::stringstream sstr(value);
+                  using namespace CommandLineParserConverters;
                   sstr >> *arg;
                 },
                 argument.m_value);

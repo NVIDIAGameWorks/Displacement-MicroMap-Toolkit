@@ -37,6 +37,7 @@
 #define VMA_IMPLEMENTATION
 #include "imgui/imgui_camera_widget.h"
 #include "imgui/imgui_helper.h"
+#include "nvmath/nvmath.h"
 #include "nvh/primitives.hpp"
 #include "nvvk/buffers_vk.hpp"
 #include "nvvk/commands_vk.hpp"
@@ -68,7 +69,10 @@
 #include "nesting_scoped_timer.hpp"
 
 
-namespace nvvkhl {
+namespace {
+
+using namespace nvvkhl;
+
 //////////////////////////////////////////////////////////////////////////
 /// </summary> Ray trace multiple primitives
 class Raytracing : public nvvkhl::IAppElement
@@ -220,7 +224,7 @@ public:
       ImGui::Separator();
       ImGui::Text("Sun Orientation");
       PropertyEditor::begin();
-      nvmath::vec3f dir = m_skyParams.directionToLight;
+      glm::vec3 dir = m_skyParams.directionToLight;
       ImGuiH::azimuthElevationSliders(dir, false);
       m_skyParams.directionToLight = dir;
       PropertyEditor::end();
@@ -244,24 +248,24 @@ public:
   {
     auto sdbg = m_dutil->DBG_SCOPE(cmd);
 
-    float         view_aspect_ratio = m_viewSize.x / m_viewSize.y;
-    nvmath::vec3f eye;
-    nvmath::vec3f center;
-    nvmath::vec3f up;
+    float     view_aspect_ratio = m_viewSize.x / m_viewSize.y;
+    glm::vec3 eye;
+    glm::vec3 center;
+    glm::vec3 up;
     CameraManip.getLookat(eye, center, up);
 
     // Update the uniform buffer containing frame info
-    FrameInfo   finfo{};
-    const auto& clip = CameraManip.getClipPlanes();
-    finfo.view       = CameraManip.getMatrix();
-    finfo.proj       = nvmath::perspectiveVK(CameraManip.getFov(), view_aspect_ratio, clip.x, clip.y);
-    finfo.projInv    = nvmath::inverse(finfo.proj);
-    finfo.viewInv    = nvmath::inverse(finfo.view);
-    finfo.camPos     = eye;
-    vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(FrameInfo), &finfo);
+    shaders::FrameInfo finfo{};
+    const auto&        clip = CameraManip.getClipPlanes();
+    finfo.view              = CameraManip.getMatrix();
+    finfo.proj              = nvmath::perspectiveVK(CameraManip.getFov(), view_aspect_ratio, clip.x, clip.y);
+    finfo.projInv           = nvmath::inverse(finfo.proj);
+    finfo.viewInv           = nvmath::inverse(finfo.view);
+    finfo.camPos            = eye;
+    vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(shaders::FrameInfo), &finfo);
 
     // Update the sky
-    vkCmdUpdateBuffer(cmd, m_bSkyParams.buffer, 0, sizeof(ProceduralSkyShaderParameters), &m_skyParams);
+    vkCmdUpdateBuffer(cmd, m_bSkyParams.buffer, 0, sizeof(nvvkhl_shaders::ProceduralSkyShaderParameters), &m_skyParams);
 
     // Ray trace
     std::vector<VkDescriptorSet> desc_sets{m_rtSet->getSet()};
@@ -275,7 +279,7 @@ public:
     m_pushConst.maxDepth  = m_settings.maxDepth;
     m_pushConst.numBaseTriangles =
         m_settings.showWireframe ? static_cast<int>(pow(2.0F, static_cast<float>(m_settings.subdivlevel))) : 0;
-    vkCmdPushConstants(cmd, m_rtPipe.layout, VK_SHADER_STAGE_ALL, 0, sizeof(PushConstant), &m_pushConst);
+    vkCmdPushConstants(cmd, m_rtPipe.layout, VK_SHADER_STAGE_ALL, 0, sizeof(shaders::PushConstant), &m_pushConst);
 
     const auto& regions = m_sbt.getRegions();
     const auto& size    = m_app->getViewportSize();
@@ -286,8 +290,8 @@ private:
   void createScene()
   {
     // Adding a plane & material
-    m_materials.push_back({vec4(.7F, .7F, .7F, 1.0F)});
-    m_meshes.emplace_back(nvh::plane(3, 1.0F, 1.0F));
+    m_materials.push_back({nvmath::vec4f(.7F, .7F, .7F, 1.0F)});
+    m_meshes.emplace_back(nvh::createPlane(3.0F, 1.0F, 1.0F));
     auto& n       = m_nodes.emplace_back();
     n.mesh        = static_cast<int>(m_meshes.size()) - 1;
     n.material    = static_cast<int>(m_materials.size()) - 1;
@@ -298,11 +302,11 @@ private:
     CameraManip.setLookat({0.96777, 1.33764, 1.31298}, {-0.08092, 0.20461, -0.14889}, {0.00000, 1.00000, 0.00000});
 
     // Default Sky values
-    m_skyParams = initSkyShaderParameters();
+    m_skyParams = nvvkhl_shaders::initSkyShaderParameters();
   }
 
 
-  void createGbuffers(const vec2& size)
+  void createGbuffers(const nvmath::vec2f& size)
   {
     vkDeviceWaitIdle(m_device);
 
@@ -323,17 +327,17 @@ private:
                          | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 
     // Create a buffer of Vertex and Index per mesh
-    std::vector<PrimMeshInfo> prim_info;
+    std::vector<shaders::PrimMeshInfo> prim_info;
     for(size_t i = 0; i < m_meshes.size(); i++)
     {
       auto& m    = m_bMeshes[i];
       m.vertices = m_alloc->createBuffer(cmd, m_meshes[i].vertices, rt_usage_flag);
-      m.indices  = m_alloc->createBuffer(cmd, m_meshes[i].indices, rt_usage_flag);
+      m.indices  = m_alloc->createBuffer(cmd, m_meshes[i].triangles, rt_usage_flag);
       m_dutil->DBG_NAME_IDX(m.vertices.buffer, i);
       m_dutil->DBG_NAME_IDX(m.indices.buffer, i);
 
       // To find the buffers of the mesh (buffer reference)
-      PrimMeshInfo info{};
+      shaders::PrimMeshInfo info{};
       info.vertexAddress = nvvk::getBufferDeviceAddress(m_device, m.vertices.buffer);
       info.indexAddress  = nvvk::getBufferDeviceAddress(m_device, m.indices.buffer);
       prim_info.emplace_back(info);
@@ -344,20 +348,20 @@ private:
     m_dutil->DBG_NAME(m_bPrimInfo.buffer);
 
     // Create the buffer of the current frame, changing at each frame
-    m_bFrameInfo = m_alloc->createBuffer(sizeof(FrameInfo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    m_bFrameInfo = m_alloc->createBuffer(sizeof(shaders::FrameInfo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     m_dutil->DBG_NAME(m_bFrameInfo.buffer);
 
     // Create the buffer of sky parameters, updated at each frame
-    m_bSkyParams = m_alloc->createBuffer(sizeof(ProceduralSkyShaderParameters), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    m_bSkyParams = m_alloc->createBuffer(sizeof(nvvkhl_shaders::ProceduralSkyShaderParameters), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     m_dutil->DBG_NAME(m_bSkyParams.buffer);
 
     // Primitive instance information
-    std::vector<InstanceInfo> inst_info;
+    std::vector<shaders::InstanceInfo> inst_info;
     for(auto& node : m_nodes)
     {
-      InstanceInfo info{};
+      shaders::InstanceInfo info{};
       info.transform  = node.localMatrix();
       info.materialID = node.material;
       inst_info.emplace_back(info);
@@ -370,11 +374,11 @@ private:
     m_dutil->DBG_NAME(m_bMaterials.buffer);
 
     // Buffer references of all scene elements
-    SceneDescription scene_desc{};
+    shaders::SceneDescription scene_desc{};
     scene_desc.materialAddress = nvvk::getBufferDeviceAddress(m_device, m_bMaterials.buffer);
     scene_desc.primInfoAddress = nvvk::getBufferDeviceAddress(m_device, m_bPrimInfo.buffer);
     scene_desc.instInfoAddress = nvvk::getBufferDeviceAddress(m_device, m_bInstInfoBuffer.buffer);
-    m_bSceneDesc               = m_alloc->createBuffer(cmd, sizeof(SceneDescription), &scene_desc,
+    m_bSceneDesc               = m_alloc->createBuffer(cmd, sizeof(shaders::SceneDescription), &scene_desc,
                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     m_dutil->DBG_NAME(m_bSceneDesc.buffer);
 
@@ -389,7 +393,7 @@ private:
                                                                    VkDeviceAddress           vertexAddress,
                                                                    VkDeviceAddress           indexAddress)
   {
-    auto max_primitive_count = static_cast<uint32_t>(prim.indices.size() / 3);
+    auto max_primitive_count = static_cast<uint32_t>(prim.triangles.size());
 
     // Describe buffer as array of VertexObj.
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
@@ -398,7 +402,7 @@ private:
     triangles.vertexStride             = sizeof(nvh::PrimitiveVertex);
     triangles.indexType                = VK_INDEX_TYPE_UINT32;
     triangles.indexData.deviceAddress  = indexAddress;
-    triangles.maxVertex                = static_cast<uint32_t>(prim.vertices.size());
+    triangles.maxVertex                = static_cast<uint32_t>(prim.vertices.size()) - 1;
     //triangles.transformData; // Identity
 
     // Identify the above data as containing opaque triangles.
@@ -600,7 +604,7 @@ private:
     shader_groups.push_back(group);
 
     // Push constant: we want to be able to update constants used by the shaders
-    VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(PushConstant)};
+    VkPushConstantRange push_constant{VK_SHADER_STAGE_ALL, 0, sizeof(shaders::PushConstant)};
 
     VkPipelineLayoutCreateInfo pipeline_layout_create_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pipeline_layout_create_info.pushConstantRangeCount = 1;
@@ -693,13 +697,13 @@ private:
   std::unique_ptr<MicromapProcess>              m_micromap;
 
 
-  vec2                             m_viewSize    = {1, 1};
+  nvmath::vec2f                    m_viewSize    = {1, 1};
   VkFormat                         m_colorFormat = VK_FORMAT_R8G8B8A8_UNORM;       // Color format of the image
   VkFormat                         m_depthFormat = VK_FORMAT_X8_D24_UNORM_PACK32;  // Depth format of the depth buffer
   VkClearColorValue                m_clearColor  = {{0.3F, 0.3F, 0.3F, 1.0F}};     // Clear color
   VkDevice                         m_device      = VK_NULL_HANDLE;                 // Convenient
   std::unique_ptr<nvvkhl::GBuffer> m_gBuffer;                                      // G-Buffers: color + depth
-  ProceduralSkyShaderParameters    m_skyParams{};
+  nvvkhl_shaders::ProceduralSkyShaderParameters m_skyParams{};
 
   // Resources
   struct PrimitiveMeshVk
@@ -720,17 +724,17 @@ private:
   // Data and setting
   struct Material
   {
-    vec4 color{1.F};
+    nvmath::vec4f color{1.F};
   };
   std::vector<nvh::PrimitiveMesh> m_meshes;
   std::vector<nvh::Node>          m_nodes;
   std::vector<Material>           m_materials;
 
   // Pipeline
-  PushConstant     m_pushConst{};                        // Information sent to the shader
-  VkPipelineLayout m_pipelineLayout   = VK_NULL_HANDLE;  // The description of the pipeline
-  VkPipeline       m_graphicsPipeline = VK_NULL_HANDLE;  // The graphic pipeline to render
-  int              m_frame{0};
+  shaders::PushConstant m_pushConst{};                        // Information sent to the shader
+  VkPipelineLayout      m_pipelineLayout   = VK_NULL_HANDLE;  // The description of the pipeline
+  VkPipeline            m_graphicsPipeline = VK_NULL_HANDLE;  // The graphic pipeline to render
+  int                   m_frame{0};
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   nvvk::SBTWrapper           m_sbt;  // Shader binding table wrapper
@@ -738,7 +742,7 @@ private:
   PipelineContainer          m_rtPipe;
 };
 
-}  // namespace nvvkhl
+}  // namespace
 //////////////////////////////////////////////////////////////////////////
 ///
 ///
@@ -801,7 +805,7 @@ auto main(int argc, char** argv) -> int
   app->addElement(std::make_shared<nvvkhl::ElementCamera>());
   app->addElement(std::make_shared<nvvkhl::ElementDefaultMenu>());         // Menu / Quit
   app->addElement(std::make_shared<nvvkhl::ElementDefaultWindowTitle>());  // Window title info
-  app->addElement(std::make_shared<nvvkhl::Raytracing>());
+  app->addElement(std::make_shared<Raytracing>());
 
 
   app->run();

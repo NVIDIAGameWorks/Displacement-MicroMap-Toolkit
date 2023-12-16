@@ -119,9 +119,8 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
                      "Selects textures to resample/re-bake from the high to the low level mesh: <none, normals, all>. "
                      "default=none");
   parser.addArgument({"--resample-resolution"}, &args.resampleResolution,
-                     "When resampling, the resolution in pixels of each side of each of the output textures. 0 to "
-                     "match "
-                     "high level mesh. default=0");
+                     "When resampling, the resolution in pixels of the output textures. 0x0 to match high level mesh. "
+                     "default=0x0");
   parser.addArgument({"--resample-extra-textures"}, &resampleExtraTexturesStr,
                      "Specifies extra textures, other than those in the .gltf files, to resample from the hi-res to "
                      "the "
@@ -136,13 +135,17 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
                      "--resample-extra-textures=\"[{\\\"in\\\":\\\"0.png\\\"},{\\\"mesh\\\":1,\\\"in\\\":\\\"1."
                      "png\\\",\\\"out\\\":\\\"1-resampled.png\\\",\\\"normal_map\\\":true}]\"");
   parser.addArgument({"--quaternion-textures-stem"}, &args.quaternionTexturesStem,
-                     "Generates a quaternion texture named {argument}.{mesh index}.png for each mesh.");
+                     "Generates quaternion textures named {argument}.{mesh index}.png for each mesh.");
   parser.addArgument({"--offset-textures-stem"}, &args.offsetTexturesStem,
-                     "Generates an offset texture named {argument}.{mesh index}.png for each mesh.");
+                     "Generates offset textures named {argument}.{mesh index}.png for each mesh.");
   parser.addArgument({"--height-textures-stem"}, &args.heightTexturesStem,
-                     "Generates a heightmap texture named {argument}.{mesh index}.png for each mesh. Note that values "
+                     "Generates heightmap textures named {argument}.{mesh index}.png for each mesh. Note that values "
                      "are relative to the direction vectors with direction bounds, not normals! Best used with "
-                     "--subdivmode uniform and --fit-direction-bounds false.");
+                     "--subdivmode uniform and --fit-direction-bounds false. Intended for use with the input base "
+                     "mesh.");
+  parser.addArgument({"--normal-textures-stem"}, &args.normalTexturesStem,
+                     "Generates normalmap textures named {argument}.{mesh index}.png for each mesh even when the "
+                     "reference mesh is missing a normalmap. This allows generating normalmaps from scratch.");
   parser.addArgument({"--memLimitMb"}, &args.memLimitMb,
                      "Attempt to keep memory usage below this threshold. 0 to use available memory. default=0");
   parser.addArgument({"--tangents"}, &tangentAlgorithmName,
@@ -179,7 +182,7 @@ bool toolBakeParse(int argc, char** argv, ToolBakeArgs& args, std::ostream& os)
   parser.addArgument({"--minPSNR"}, &args.minPSNR, "Compression level. default=50.0f");
 
   parser.addArgument({"--maxDisplacement"}, &args.maxDisplacement,
-                     "HIGH-LOW: Max lookup displacement distance, in percent of scene radius");
+                     "HIGH-LOW: Max lookup displacement distance, in percent of scene radius. default=5.0");
   parser.addArgument({"--maxDistanceFactor"}, &args.maxDistanceFactor,
                      "HIGH-LOW: Factor applied to the maximum tracing distance, useful when the displacement "
                      "bounds define a tight shell around the original geometry. default=1.0");

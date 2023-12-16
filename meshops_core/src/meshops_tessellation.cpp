@@ -75,6 +75,7 @@ struct TessellateConfig
 
 struct TessPayload
 {
+  Context&                            meshopsContext;
   MeshView                            inMeshView;
   ResizableMeshView&                  outMeshView;
   TessellateConfig                    config;
@@ -84,6 +85,7 @@ struct TessPayload
   std::vector<float>                  threadDistances;
   const micromesh::ArrayInfo_uint16*  triangleSubdivLevels = nullptr;
   std::vector<MicroVertexInfoVector>  threadSanitizeMicroVertices;
+  bool                                tessellationError = false;
 };
 
 struct TessVertex
@@ -122,8 +124,16 @@ void* tessBeginTriangleUncompressed(uint32_t meshTriangleIndex, uint32_t microma
   micromesh::MicromapValueFloatExpansion outputExp;
 
   micromesh::FormatInfo inputFormatInfo;
-  [[maybe_unused]] micromesh::Result result = micromesh::micromeshFormatGetInfo(inputQuantized.format, &inputFormatInfo);
-  assert(micromesh::Result::eSuccess == result);
+  micromesh::Result     result = micromesh::micromeshFormatGetInfo(inputQuantized.format, &inputFormatInfo);
+  if(result != micromesh::Result::eSuccess)
+  {
+    if(!payload.tessellationError)  // not synchronized, but printing an extra error per thread won't hurt
+    {
+      MESHOPS_LOGE(payload.meshopsContext, "micromesh::micromeshFormatGetInfo() returned %s", micromeshResultGetName(result));
+    }
+    payload.tessellationError = true;
+    assert(false);
+  }
   if(inputFormatInfo.isCompressedOrPacked)
   {
     result = micromesh::micromeshQuantizedPackedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat,
@@ -134,7 +144,15 @@ void* tessBeginTriangleUncompressed(uint32_t meshTriangleIndex, uint32_t microma
     result = micromesh::micromeshQuantizedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat, &outputExp,
                                                         payload.messageCallback);
   }
-  assert(micromesh::Result::eSuccess == result);
+  if(result != micromesh::Result::eSuccess)
+  {
+    if(!payload.tessellationError)  // not synchronized, but printing an extra error per thread won't hurt
+    {
+      MESHOPS_LOGE(payload.meshopsContext, "converting quantized to float values returned %s", micromeshResultGetName(result));
+    }
+    payload.tessellationError = true;
+    assert(false);
+  }
 
   return triFloats;
 }
@@ -158,9 +176,18 @@ void* tessBeginTriangleCompressed(uint32_t meshTriangleIndex, uint32_t micromapT
   inputExp.bias[0]  = group.floatBias.r;
   inputExp.scale[0] = group.floatScale.r;
   micromesh::MicromapValueFloatExpansion outputExp;
-  [[maybe_unused]] micromesh::Result     result =
-      micromesh::micromeshQuantizedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat, &outputExp, payload.messageCallback);
-  assert(result == micromesh::Result::eSuccess);
+  micromesh::Result result = micromesh::micromeshQuantizedToFloatValues(false, &inputQuantized, &inputExp, &outputFloat,
+                                                                        &outputExp, payload.messageCallback);
+  if(result != micromesh::Result::eSuccess)
+  {
+    if(!payload.tessellationError)  // not synchronized, but printing an extra error per thread won't hurt
+    {
+      MESHOPS_LOGE(payload.meshopsContext, "micromesh::micromeshQuantizedToFloatValues() returned %s",
+                   micromeshResultGetName(result));
+    }
+    payload.tessellationError = true;
+    assert(false);
+  }
 
   return triFloats;
 }
@@ -288,7 +315,7 @@ static TessVertex makeVertex(const micromesh::VertexGenerateInfo* vertexInfo, ui
                                                           bary::ValueFrequency::ePerVertex, vertexInfo->vertexUV.u,
                                                           vertexInfo->vertexUV.v, 0, triShading.subdivLevel);
 
-      result.vertexNormal = nvmath::oct32_to_vec(reinterpret_cast<const uint32_t*>(
+      result.vertexNormal = shaders::oct32_to_vec(reinterpret_cast<const uint32_t*>(
           payload.config.baryNormal->values)[group.valueFirst + triShading.valuesOffset + valueIndex]);
     }
     else
@@ -375,7 +402,7 @@ static uint32_t tessPerVertex(const micromesh::VertexGenerateInfo* vertexInfo,
 
 micromesh::Result tessellateMesh(Context context, const meshops::MeshView& meshView, meshops::ResizableMeshView& outMesh, TessellateConfig& config)
 {
-  TessPayload payload      = {meshView, outMesh, config};
+  TessPayload payload      = {context, meshView, outMesh, config};
   payload.maxMicroVertices = micromesh::subdivLevelGetVertexCount(config.maxSubdivLevel);
 
   MeshAttributeFlags attribFlags = meshView.getMeshAttributeFlags();
@@ -493,6 +520,11 @@ micromesh::Result tessellateMesh(Context context, const meshops::MeshView& meshV
   // shrink vertex buffers due to dedup
   outMesh.resize(attribFlags, output.meshTriangleVertices.count, output.vertexCount);
   assert(output.meshTriangleVertices.count && output.vertexCount);
+
+  if(payload.tessellationError)
+  {
+    return micromesh::Result::eFailure;
+  }
   return result;
 }
 

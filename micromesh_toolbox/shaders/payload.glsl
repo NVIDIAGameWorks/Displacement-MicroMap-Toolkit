@@ -11,11 +11,7 @@ struct HitPayload
   float    hitT;
   int      instanceIndex;
   HitState hit;
-  //  vec3  pos;
-  //  vec3  nrm;
-  //  vec3  tangent;
-  //  vec3  bitangent;
-  //  vec2  uv;
+  bool     micromesh;
 };
 
 #endif  // PAYLOAD_H

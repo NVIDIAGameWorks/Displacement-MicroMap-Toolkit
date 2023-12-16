@@ -306,8 +306,9 @@ MESHOPS_API micromesh::Result MESHOPS_CALL meshopsOpBake(Context context, BakerO
       MESHOPS_LOGE(context, "Non-zero OpBake_input::ResamplerInput::texCoordIndex (%u) is not supported", texture.textureCoord);
       return micromesh::Result::eInvalidValue;
     }
-    bool generatedTextureType = texture.textureType == TextureType::eQuaternionMap || texture.textureType == TextureType::eOffsetMap
-                                || texture.textureType == TextureType::eHeightMap;
+    bool generatedTextureType = texture.textureType == TextureType::eQuaternionMap
+                                || texture.textureType == TextureType::eOffsetMap || texture.textureType == TextureType::eHeightMap
+                                || texture.textureType == TextureType::eNewNormalMap;
     if(texture.texture)
     {
       if(generatedTextureType)

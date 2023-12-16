@@ -14,6 +14,8 @@
 #define PAYLOAD_H
 
 #ifdef __cplusplus
+#include <nvmath/nvmath.h>
+namespace shaders {
 using vec3 = nvmath::vec3f;
 #endif  // __cplusplus
 
@@ -34,5 +36,9 @@ HitPayload initPayload()
   p.weight = vec3(1);
   return p;
 }
+
+#ifdef __cplusplus
+}  // namespace shaders
+#endif
 
 #endif  // PAYLOAD_H

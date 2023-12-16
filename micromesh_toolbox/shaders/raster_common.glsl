@@ -16,7 +16,6 @@
 #include "octant_encoding.h"
 
 #include "nvvkhl/shaders/dh_sky.h"
-#include "nvvkhl/shaders/pbr_eval.glsl"
 #include "nvvkhl/shaders/light_contrib.glsl"
 #include "nvvkhl/shaders/dh_tonemap.h"
 #include "nvvkhl/shaders/ray_util.glsl"
@@ -87,12 +86,11 @@ layout(set = 2, binding = eSkyParam) uniform SkyInfo_
   ProceduralSkyShaderParameters skyInfo;
 };
 
-  // clang-format on
-
 #include "colormap.glsl"
 #include "hit_state.h"
 
-#include "nvvkhl/shaders/mat_eval.glsl"
+#include "pbr_eval.glsl"
+#include "mat_eval.glsl"
 #include "raster_simple_phong.glsl"
 #include "raster_anisotropy.glsl"
 #include "get_hit.glsl"

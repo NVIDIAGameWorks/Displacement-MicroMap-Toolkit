@@ -265,11 +265,11 @@ uint isqrt(uint n)
 //           increasing the u coordinate moves towards U.
 //
 //               V
-//              / \
-//             / 3 \
-//            /_____\
-//           / \-U / \
-//          /   \ /+U \
+//              / \ 
+//             / 3 \ 
+//            /_____\ 
+//           / \-U / \ 
+//          /   \ /+U \ 
 //         W ___ x ___ U
 //
 void uMajorTriangle(uint i, uint subdiv, out ivec3 corner, out bool negU)
@@ -321,6 +321,26 @@ ivec3 decimateEdges(ivec3 ibary, uint triangleSubdiv, uint edge0Subdiv, uint edg
     ibary.x = edgeSegments - ibary.z;
   }
   return ibary;
+}
+
+// Need higher precision than HW texture filtering to avoid staircases at high
+// tesesllation.
+vec4 sampleHeight(sampler2D tex, vec2 coord)
+{
+  ivec2 size  = textureSize(tex, 0);
+  vec2  texel = coord * size - 0.5;
+  ivec2 i     = ivec2(floor(texel)) % size;
+  if(i.x < 0)
+    i.x += size.x;
+  if(i.y < 0)
+    i.y += size.y;
+  vec2  f  = fract(texel);
+  ivec2 aa = (i + ivec2(0, 0)) % size;
+  ivec2 ba = (i + ivec2(1, 0)) % size;
+  ivec2 ab = (i + ivec2(0, 1)) % size;
+  ivec2 bb = (i + ivec2(1, 1)) % size;
+  return mix(mix(texelFetch(tex, aa, 0), texelFetch(tex, ba, 0), f.x),
+             mix(texelFetch(tex, ab, 0), texelFetch(tex, bb, 0), f.x), f.y);
 }
 
 void main()
@@ -436,7 +456,7 @@ void main()
         }
       }
 
-      dispDistance = texture(texturesMap[nonuniformEXT(mat.khrDisplacementTexture)], tex).x;
+      dispDistance = sampleHeight(texturesMap[nonuniformEXT(mat.khrDisplacementTexture)], tex).x;
 
       // Take the average of displacements along seams. See WatertightIndices.
       if(baryIsMidEdge(ibary))
@@ -453,7 +473,7 @@ void main()
           vec2 edgeTex0 = TexCoords(pinfo.vertexTexcoordBuffer).v[edgeVerts.x];
           vec2 edgeTex1 = TexCoords(pinfo.vertexTexcoordBuffer).v[edgeVerts.y];
           vec2 edgeTex  = mix(edgeTex0, edgeTex1, baryOnEdgeInterp(edgeIdx, bary));
-          dispDistance = mix(dispDistance, texture(texturesMap[nonuniformEXT(mat.khrDisplacementTexture)], edgeTex).x, 0.5);
+          dispDistance = mix(dispDistance, sampleHeight(texturesMap[nonuniformEXT(mat.khrDisplacementTexture)], edgeTex).x, 0.5);
         }
       }
 

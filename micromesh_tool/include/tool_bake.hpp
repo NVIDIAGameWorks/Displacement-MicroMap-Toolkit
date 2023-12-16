@@ -92,7 +92,7 @@ struct ToolBakeArgs
   bool               heightmapDirectionsGen  = false;
   NormalReduceOp     heightmapDirectionsOp   = NormalReduceOp::eNormalReduceNormalizedLinear;
   TexturesToResample texturesToResample      = TexturesToResample::eNone;
-  int                resampleResolution      = 0;
+  nvmath::vec2i      resampleResolution      = {0, 0};
   meshops::TangentSpaceAlgorithm tangentAlgorithm     = meshops::TangentSpaceAlgorithm::eDefault;
   bool                           fitDirectionBounds   = true;
   bool                           heightmapPNtriangles = false;
@@ -117,6 +117,7 @@ struct ToolBakeArgs
   std::string                       quaternionTexturesStem;
   std::string                       offsetTexturesStem;
   std::string                       heightTexturesStem;
+  std::string                       normalTexturesStem;
   std::vector<std::string>          heightmaps;  // Per-mesh heightmaps, overriding any in gltf materials
 };
 

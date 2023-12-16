@@ -147,7 +147,8 @@ enum class TextureType : uint32_t
   eNormalMap     = 1, /* RGB components store 0.5 * (normal) + 0.5. */
   eQuaternionMap = 2, /* RGBA components store 0.5 * (quaternion) + 0.5. */
   eOffsetMap     = 3, /* RG components store 0.5 * (offset) + 0.5. */
-  eHeightMap     = 4  /* R component stores displacement. */
+  eHeightMap     = 4, /* R component stores displacement. */
+  eNewNormalMap  = 5  /* eNormalMap without an input to resample */
 };
 
 enum TextureUsageFlagBit : uint64_t
@@ -650,7 +651,7 @@ struct OpCompressDisplacementMicromap_input
 {
   micromesh::OpCompressDisplacement_settings settings;
 
-  // values must be eR32_sfloat, eR8_unorm, eR16_unorm, or eR11_unorm_packed16
+  // values must be eR32_sfloat, eR8_unorm, eR16_unorm, eR11_unorm_packed16, or eR11_unorm_packed_align32
   const bary::BasicView* uncompressedDisplacement           = nullptr;
   uint32_t               uncompressedDisplacementGroupIndex = 0;
 

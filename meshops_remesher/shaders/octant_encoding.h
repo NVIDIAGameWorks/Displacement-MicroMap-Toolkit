@@ -13,13 +13,15 @@
 
 
 #ifdef __cplusplus
-namespace nvmath {
+#include <nvmath/nvmath.h>
+namespace shaders {
+using uint = uint32_t;
 using vec2 = vec2f;
 using vec3 = vec3f;
 #define OCT_INLINE inline
-#define OCT_FLOOR nv_floor
-#define OCT_CLAMP nv_clamp
-#define OCT_ABS nv_abs
+#define OCT_FLOOR nvmath::nv_floor
+#define OCT_CLAMP nvmath::nv_clamp
+#define OCT_ABS nvmath::nv_abs
 OCT_INLINE uint32_t pack_oct32(vec2 v)
 {
   union
@@ -27,8 +29,8 @@ OCT_INLINE uint32_t pack_oct32(vec2 v)
     int16_t  snorm[2];
     uint32_t packed;
   };
-  snorm[0] = static_cast<int16_t>(nv_clamp(int32_t(std::round(v.x * float(0x7FFF))), -0x7FFF, 0x7FFF));
-  snorm[1] = static_cast<int16_t>(nv_clamp(int32_t(std::round(v.y * float(0x7FFF))), -0x7FFF, 0x7FFF));
+  snorm[0] = static_cast<int16_t>(nvmath::nv_clamp(int32_t(std::round(v.x * float(0x7FFF))), -0x7FFF, 0x7FFF));
+  snorm[1] = static_cast<int16_t>(nvmath::nv_clamp(int32_t(std::round(v.y * float(0x7FFF))), -0x7FFF, 0x7FFF));
   return packed;
 }
 OCT_INLINE vec2 unpack_oct32(uint32_t v)
@@ -134,7 +136,7 @@ OCT_INLINE uint vec_to_oct32(vec3 v)
 #undef OCT_INLINE
 
 #ifdef __cplusplus
-}
+}  // namespace shaders
 #endif
 
 #endif

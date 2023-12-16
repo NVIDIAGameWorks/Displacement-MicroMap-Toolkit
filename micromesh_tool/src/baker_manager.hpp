@@ -36,6 +36,7 @@ constexpr VkFormat RESAMPLE_DISTANCE_FORMAT   = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat RESAMPLE_QUATERNION_FORMAT = RESAMPLE_COLOR_FORMAT;
 constexpr VkFormat RESAMPLE_OFFSET_FORMAT     = VK_FORMAT_R16G16B16A16_UNORM;
 constexpr VkFormat RESAMPLE_HEIGHT_FORMAT     = VK_FORMAT_R16_UNORM;
+constexpr VkFormat RESAMPLE_NORMAL_FORMAT     = RESAMPLE_COLOR_FORMAT;
 
 // Represents an index into one of the BakerManager's vectors.
 struct GPUTextureIndex
@@ -66,7 +67,8 @@ struct GPUTextureIndex
 };
 
 constexpr size_t NoInputIndex         = ~size_t(0);
-constexpr size_t OutputAuxIndex       = ~size_t(0);
+constexpr size_t InvalidOutputIndex   = ~size_t(0);
+constexpr size_t AuxOutputIndex       = ~size_t(0);
 constexpr size_t InvalidDistanceIndex = ~size_t(0);
 
 // This is used to encode ResampleTextureContainer more compactly.
@@ -74,8 +76,8 @@ struct ResampleInstruction
 {
   meshops::TextureType texelContent = meshops::TextureType::eGeneric;
   size_t inputIndex = NoInputIndex;  // Into m_resamplingInputStorage; may be NoInputIndex if texelContent is not eGeneric
-  size_t outputIndex = OutputAuxIndex;  // Into m_resamplingOutputStorage unless OutputAuxIndex, which redirects to outputAuxIndex
-  size_t outputAuxIndex{};              // Into m_resamplingOutputStorageAux
+  size_t outputIndex = InvalidOutputIndex;      // Into m_resamplingOutputStorage
+  size_t sceneImage  = AuxOutputIndex;          // Into m_lowMesh->images() or appendAuxImage() if AuxOutputIndex
   size_t distanceIndex = InvalidDistanceIndex;  // Into m_resamplingDistanceStorage
 };
 
@@ -126,10 +128,11 @@ struct BakerManagerConfig
   std::string                       outTextureStem;  // Output filename stem for generated textures
   std::vector<ResampleExtraTexture> resampleExtraTextures;
   std::string                       quaternionTexturesStem;
-  std::string                       heightTexturesStem;
   std::string                       offsetTexturesStem;
+  std::string                       heightTexturesStem;
+  std::string                       normalTexturesStem;
   TexturesToResample                texturesToResample = TexturesToResample::eNone;
-  int                               resampleResolution{0};
+  nvmath::vec2i                     resampleResolution{0, 0};
 };
 
 class BakerManager

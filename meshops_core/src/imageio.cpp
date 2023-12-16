@@ -288,7 +288,31 @@ bool info(const char* filename, size_t* width, size_t* height, size_t* component
     *height     = static_cast<size_t>(y);
     *components = static_cast<size_t>(comp);
   }
-  return stb_result;
+  else
+  {
+    EXRVersion exr_version;
+    if(ParseEXRVersionFromFile(&exr_version, filename) != TINYEXR_SUCCESS)
+    {
+      return false;
+    }
+
+    const char* tinyEXR_error = nullptr;
+    EXRHeader   exr_header;
+    InitEXRHeader(&exr_header);
+    if(ParseEXRHeaderFromFile(&exr_header, &exr_version, filename, &tinyEXR_error) != TINYEXR_SUCCESS)
+    {
+      FreeEXRHeader(&exr_header);
+      return false;
+    }
+
+    *width      = exr_header.data_window.max_x - exr_header.data_window.min_x + 1;
+    *height     = exr_header.data_window.max_y - exr_header.data_window.min_y + 1;
+    *components = exr_header.num_channels;
+
+    FreeEXRHeader(&exr_header);
+  }
+
+  return true;
 }
 
 bool infoFromMemory(const void* data, const size_t byteLength, size_t* width, size_t* height, size_t* components)

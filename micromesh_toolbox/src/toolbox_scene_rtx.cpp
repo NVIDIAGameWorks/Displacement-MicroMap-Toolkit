@@ -12,8 +12,14 @@
 
 
 #include "toolbox_scene_rtx.hpp"
+#include "heightmap_rtx.h"
 #include "meshops/meshops_vk.h"
 #include "nvh/timesampler.hpp"
+#include "vulkan/vulkan_core.h"
+#include <nvvk/error_vk.hpp>
+#include <nvvk/resourceallocator_vk.hpp>
+#include <glm/detail/type_half.hpp>
+#include <settings.hpp>
 
 ToolboxSceneRtx::ToolboxSceneRtx(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, uint32_t queueFamilyIndex)
     : m_ctx(ctx)
@@ -37,15 +43,16 @@ ToolboxSceneRtx::~ToolboxSceneRtx()
 //--------------------------------------------------------------------------------------------------
 // Create the acceleration structures for the `ToolScene`
 //
-void ToolboxSceneRtx::create(const std::unique_ptr<micromesh_tool::ToolScene>& scene,
+void ToolboxSceneRtx::create(const ViewerSettings&                             settings,
+                             const std::unique_ptr<micromesh_tool::ToolScene>& scene,
                              const std::unique_ptr<ToolboxSceneVk>&            sceneVK,
-                             bool                                              useMicroMesh,
+                             bool                                              hasMicroMesh,
                              VkBuildAccelerationStructureFlagsKHR flags /*= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR*/)
 {
   destroy();  // Make sure not to leave allocated buffers
 
-  createBottomLevelAS(scene, sceneVK, flags, useMicroMesh);
-  createTopLevelAS(scene, flags, useMicroMesh);
+  createBottomLevelAS(settings, scene, sceneVK, flags, hasMicroMesh, settings.geometryView.baked);
+  createTopLevelAS(scene, flags);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -54,6 +61,23 @@ void ToolboxSceneRtx::create(const std::unique_ptr<micromesh_tool::ToolScene>& s
 void ToolboxSceneRtx::destroy()
 {
   m_rtBuilder.destroy();
+
+  // TODO: raii and stop calling destroy() on objects that aren't initialized
+  for(auto& map : m_heightmaps)
+  {
+    hrtxDestroyMap(map);
+  }
+  m_heightmaps.clear();
+  for(auto& buffer : m_heightmapDirections)
+  {
+    m_alloc->destroy(buffer);
+  }
+  m_heightmapDirections.clear();
+  if(m_heightmapPipeline)
+  {
+    hrtxDestroyPipeline(m_heightmapPipeline);
+    m_heightmapPipeline = nullptr;
+  }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -98,9 +122,11 @@ nvvk::RaytracingBuilderKHR::BlasInput ToolboxSceneRtx::primitiveToGeometry(const
 //--------------------------------------------------------------------------------------------------
 // Creating the Bottom Level Acceleration Structure for all `ToolMesh` in the `ToolScene`
 // -
-void ToolboxSceneRtx::createBottomLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene,
+void ToolboxSceneRtx::createBottomLevelAS(const ViewerSettings&                             settings,
+                                          const std::unique_ptr<micromesh_tool::ToolScene>& scene,
                                           const std::unique_ptr<ToolboxSceneVk>&            sceneVK,
                                           VkBuildAccelerationStructureFlagsKHR              flags,
+                                          bool                                              hasMicroMesh,
                                           bool                                              useMicroMesh)
 {
   nvh::ScopedTimer _st("- Create BLAS");
@@ -130,6 +156,8 @@ void ToolboxSceneRtx::createBottomLevelAS(const std::unique_ptr<micromesh_tool::
     auto geo = primitiveToGeometry(*mesh, vertex_address, index_address);
 
     // Add micromap information to the BLAS if it exists
+    float bias, scale;
+    int   heightmapImageIndex;
     if(useMicroMesh && (mesh->relations().bary != -1 && mesh->relations().group != -1))
     {
       const std::unique_ptr<DeviceBary>& deviceBary = sceneVK->barys()[mesh->relations().bary];
@@ -177,6 +205,103 @@ void ToolboxSceneRtx::createBottomLevelAS(const std::unique_ptr<micromesh_tool::
         geo.asGeometry[0].geometry.triangles.pNext = &geometry_displacements.back();
       }
     }
+    else if(hasMicroMesh && scene->getHeightmap(mesh->relations().material, bias, scale, heightmapImageIndex))
+    {
+      nvvk::CommandPool cmd_pool(m_ctx->m_device, m_ctx->m_queueGCT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                                 m_ctx->m_queueGCT.queue);
+      VkCommandBuffer   cmd = cmd_pool.createCommandBuffer();
+      if(!m_heightmapPipeline)
+      {
+        HrtxAllocatorCallbacks allocatorCallbacks{
+            [](const VkBufferCreateInfo bufferCreateInfo, const VkMemoryPropertyFlags memoryProperties, void* userPtr) {
+              auto alloc  = reinterpret_cast<nvvkhl::AllocVma*>(userPtr);
+              auto result = new nvvk::Buffer();
+              *result     = alloc->createBuffer(bufferCreateInfo, memoryProperties);
+              return &result->buffer;  // return pointer to member
+            },
+            [](VkBuffer* bufferPtr, void* userPtr) {
+              auto alloc = reinterpret_cast<nvvkhl::AllocVma*>(userPtr);
+              // reconstruct from pointer to member
+              auto nvvkBuffer = reinterpret_cast<nvvk::Buffer*>(reinterpret_cast<char*>(bufferPtr)
+                                                                - offsetof(nvvk::Buffer, nvvk::Buffer::buffer));
+              alloc->destroy(*nvvkBuffer);
+              delete nvvkBuffer;
+            },
+            m_alloc,
+        };
+        HrtxPipelineCreate hrtxPipelineCreate{
+            m_ctx->m_physicalDevice, m_ctx->m_device, allocatorCallbacks, VK_NULL_HANDLE, nullptr, nullptr, VK_NULL_HANDLE, [](VkResult result) {
+              nvvk::checkResult(result, "HRTX");
+            }};
+        if(hrtxCreatePipeline(cmd, &hrtxPipelineCreate, &m_heightmapPipeline) != VK_SUCCESS)
+        {
+          LOGW("Warning: Failed to create HrtxPipeline. Raytracing heightmaps will not work.\n");
+        }
+      }
+
+      // Convert direction vectors to fp16
+      using hvec4 = glm::vec<4, glm::detail::hdata>;
+      std::vector<hvec4> directionsHalfVec4(mesh->view().vertexNormals.size());
+      std::transform(mesh->view().vertexNormals.begin(), mesh->view().vertexNormals.end(), directionsHalfVec4.begin(),
+                     [](nvmath::vec3f normal) {
+                       return hvec4{glm::detail::toFloat16(normal.x), glm::detail::toFloat16(normal.y),
+                                    glm::detail::toFloat16(normal.z), glm::detail::toFloat16(0.0f)};
+                     });
+      m_heightmapDirections.push_back(m_alloc->createBuffer(cmd, directionsHalfVec4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+
+      // Barrier for displacement directions buffer. Texture coordinates and
+      // heightmap are created synchronously so no barrier is needed.
+      {
+        VkMemoryBarrier2 memoryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, nullptr, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                          VK_ACCESS_2_TRANSFER_WRITE_BIT};
+        hrtxBarrierFlags(nullptr, nullptr, &memoryBarrier.dstStageMask, &memoryBarrier.dstAccessMask, nullptr);
+        VkDependencyInfo depencencyInfo = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, nullptr, 0, 1, &memoryBarrier};
+        vkCmdPipelineBarrier2(cmd, &depencencyInfo);
+      }
+
+      // Convert image index to sceneVK->textures() index
+      size_t heightmapTextureIndex = 0;
+      for(size_t i = 0; i < scene->textures().size(); ++i)
+      {
+        if(scene->textures()[i].source == heightmapImageIndex)
+        {
+          heightmapTextureIndex = i;
+          break;
+        }
+      }
+
+      const uint32_t subdivLevel = settings.heightmapRTXSubdivLevel;
+      HrtxMapCreate  mapCreate{
+          &geo.asGeometry[0].geometry.triangles,
+          geo.asBuildOffsetInfo[0].primitiveCount,
+          nvvk::getBufferDeviceAddress(m_ctx->m_device, device_vk->vertexTexcoordBuffer.buffer),
+          VK_FORMAT_R32G32_SFLOAT,
+          sizeof(float) * 2,
+          nvvk::getBufferDeviceAddress(m_ctx->m_device, m_heightmapDirections.back().buffer),
+          VK_FORMAT_R16G16B16A16_SFLOAT,  // possible issue with VK_FORMAT_R32G32B32_SFLOAT?
+          sizeof(uint16_t) * 4,
+          sceneVK->textures()[heightmapTextureIndex].descriptor,
+          bias * settings.heightmapScale + settings.heightmapOffset,
+          scale * settings.heightmapScale,
+          subdivLevel,
+      };
+
+      HrtxMap hrtxMap;
+      if(hrtxCmdCreateMap(cmd, m_heightmapPipeline, &mapCreate, &hrtxMap) == VK_SUCCESS)
+      {
+        m_heightmaps.push_back(hrtxMap);
+        geometry_displacements.emplace_back(hrtxMapDesc(m_heightmaps.back()));
+        geo.asGeometry[0].geometry.triangles.pNext = &geometry_displacements.back();
+      }
+      else
+      {
+        LOGW("Warning: Failed to create HrtxMap for mesh %u. Raytracing heightmaps will not work.\n", p_idx);
+      }
+
+      cmd_pool.submitAndWait(cmd);
+      m_alloc->finalizeAndReleaseStaging();  // Make sure there are no pending staging buffers and clear them up
+    }
 
     all_blas.push_back({geo});
   }
@@ -188,9 +313,7 @@ void ToolboxSceneRtx::createBottomLevelAS(const std::unique_ptr<micromesh_tool::
 //--------------------------------------------------------------------------------------------------
 // Creating the Top Level Acceleration Structure for `ToolScene`
 //
-void ToolboxSceneRtx::createTopLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene,
-                                       VkBuildAccelerationStructureFlagsKHR              flags,
-                                       bool                                              useMicroMesh)
+void ToolboxSceneRtx::createTopLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene, VkBuildAccelerationStructureFlagsKHR flags)
 {
   nvh::ScopedTimer _st("- Create TLAS");
 

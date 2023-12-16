@@ -11,7 +11,7 @@
  */
 
 #include "ui_rendering.hpp"
-#include "imgui_helper.h"
+#include "imgui/imgui_helper.h"
 #include "nvvk/context_vk.hpp"
 #include "toolbox_viewer.hpp"
 
@@ -124,13 +124,24 @@ void UiRendering::sceneWarnings(const ViewerSettings::RenderView& view)
   if(scene->stats() && scene->stats()->heightmaps)
   {
     ImGui::TextColored(warningColor, "Some meshes have heightmap displacement");
-    ImGuiH::tooltip(
-        "When using rasterization, meshes with glTF KHR_materials_displacement will be subdivided and displaced. See "
-        "Raster -> Heightmaps for settings.",
-        true);
+    if(!scene->getToolSceneVK()->hasRtxMicromeshExt())
+    {
+      ImGuiH::tooltip(
+          "When using rasterization, meshes with glTF KHR_materials_displacement will be subdivided and displaced. See "
+          "Raster -> Heightmaps for settings.",
+          true);
+    }
+    else
+    {
+      ImGuiH::tooltip(
+          "Meshes with glTF KHR_materials_displacement will be subdivided and displaced. See "
+          "Raster/Raytracing -> Heightmaps for settings.",
+          true);
+    }
   }
 
-  if(view.baked && scene->getToolSceneRtx() && !scene->getToolSceneVK()->barys().empty() && !scene->getToolSceneVK()->hasRtxMicromesh())
+  if(view.baked && scene->getToolSceneRtx() && scene->getToolSceneVK()->hasRtxMicromeshData()
+     && !scene->getToolSceneVK()->hasRtxMicromeshExt())
   {
     ImGui::TextColored(warningColor, "Missing " VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME " to raytrace micromap");
   }
@@ -148,5 +159,10 @@ void UiRendering::sceneWarnings(const ViewerSettings::RenderView& view)
   if(scene->stats() && scene->stats()->normalmapsMissingTangents)
   {
     ImGui::TextColored(warningColor, "Missing tangents for normal maps");
+  }
+
+  if(view.baked && _v->settings().shading == shaders::eRenderShading_default && scene->stats() && !scene->stats()->normalmaps)
+  {
+    ImGui::TextColored(warningColor, "Using face normals as micromesh has no normal map.");
   }
 }

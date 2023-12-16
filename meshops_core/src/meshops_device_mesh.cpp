@@ -119,11 +119,11 @@ static void copyVertexAttributes(size_t                           vertexIndex,
   {
     if(vertexIndex < meshView.vertexNormals.size())
     {
-      positionNormal[vertexIndex].w = glm::uintBitsToFloat(nvmath::vec_to_oct32(meshView.vertexNormals[vertexIndex]));
+      positionNormal[vertexIndex].w = glm::uintBitsToFloat(shaders::vec_to_oct32(meshView.vertexNormals[vertexIndex]));
     }
     else
     {
-      positionNormal[vertexIndex].w = glm::uintBitsToFloat(nvmath::vec_to_oct32(nvmath::vec3f(0.f, 0.f, 1.f)));
+      positionNormal[vertexIndex].w = glm::uintBitsToFloat(shaders::vec_to_oct32(nvmath::vec3f(0.f, 0.f, 1.f)));
     }
   }
   if(settings.attribFlags & eMeshAttributeVertexTexcoordBit)
@@ -141,12 +141,12 @@ static void copyVertexAttributes(size_t                           vertexIndex,
   {
     if(vertexIndex < meshView.vertexTangents.size())
     {
-      tangentSpace[vertexIndex].x = nvmath::vec_to_oct32(nvmath::vec3f(meshView.vertexTangents[vertexIndex]));
+      tangentSpace[vertexIndex].x = shaders::vec_to_oct32(nvmath::vec3f(meshView.vertexTangents[vertexIndex]));
       tangentSpace[vertexIndex].y = glm::floatBitsToUint(meshView.vertexTangents[vertexIndex].w);
     }
     else
     {
-      tangentSpace[vertexIndex].x = nvmath::vec_to_oct32(nvmath::vec3f(1.f, 0.f, 0.f));
+      tangentSpace[vertexIndex].x = shaders::vec_to_oct32(nvmath::vec3f(1.f, 0.f, 0.f));
       tangentSpace[vertexIndex].y = glm::floatBitsToUint(1.f);
     }
   }
@@ -363,7 +363,7 @@ static void readbackVertexAttributes(uint32_t                  threadId,
     {
       if(meshView.vertexNormals.size() > index)
       {
-        normal                        = nvmath::oct32_to_vec(glm::floatBitsToUint(hostVertexPositionNormal[index].w));
+        normal                        = shaders::oct32_to_vec(glm::floatBitsToUint(hostVertexPositionNormal[index].w));
         meshView.vertexNormals[index] = normal;
       }
     }
@@ -378,7 +378,7 @@ static void readbackVertexAttributes(uint32_t                  threadId,
     {
       if(meshView.vertexTangents.size() > index)
       {
-        nvmath::vec3f tangent          = nvmath::oct32_to_vec(hostVertexTangentSpace[index].x);
+        nvmath::vec3f tangent          = shaders::oct32_to_vec(hostVertexTangentSpace[index].x);
         float         sign_bit         = glm::uintBitsToFloat(hostVertexTangentSpace[index].y);
         meshView.vertexTangents[index] = nvmath::vec4f(tangent.x, tangent.y, tangent.z, sign_bit);
       }

@@ -41,7 +41,8 @@ public:
   int32_t  baryInfoIndex(int32_t bary, int32_t group) const { return m_deviceBaryInfoMap.find({bary, group})->second; }
 
   const meshops::DeviceMesh& deviceMesh(uint32_t m) const { return m_deviceMeshes[m]; }
-  bool                       hasRtxMicromesh() const { return !m_barys.empty() && m_hasDisplacementMicromeshExt; }
+  bool                       hasRtxMicromeshExt() const { return m_hasDisplacementMicromeshExt; }
+  bool                       hasRtxMicromeshData() const { return !m_barys.empty(); }
 
 private:
   struct SceneImage  // Image to be loaded and created

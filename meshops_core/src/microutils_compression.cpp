@@ -51,7 +51,7 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
                                                 micromesh::OpContext                              ctx,
                                                 const micromesh::OpCompressDisplacement_settings& settings,
                                                 const micromesh::MeshTopology&                    topo,
-                                                const micromesh::Micromap&                        inputMap,
+                                                const micromesh::MicromapGeneric&                 inputMap,
                                                 const micromesh::ArrayInfo&                       inputTriangleMinMaxs,
                                                 const float*                                      meshMinMaxs,
                                                 const micromesh::ArrayInfo_float*                 perVertexImportance,
@@ -65,23 +65,37 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
   bary::GroupHistogramRange baryGroupHistogram  = {0};
   micromesh::Result         result;
 
-  micromesh::Micromap uncompressedMap = inputMap;
-
-  uint32_t triangleCount = uint32_t(inputMap.triangleSubdivLevels.count);
+  // even if inputMap is not uncompressed, key information does alias in memory
+  micromesh::Micromap uncompressedMap = inputMap.uncompressed;
+  uint32_t            triangleCount   = uint32_t(uncompressedMap.triangleSubdivLevels.count);
 
   // we may need to convert to r11_16
   std::vector<uint16_t> values_unorm11;
-  if(inputMap.values.format != micromesh::Format::eR11_unorm_pack16)
+  std::vector<uint32_t> values_offsets;
+  if(uncompressedMap.values.format != micromesh::Format::eR11_unorm_pack16)
   {
-    micromesh::Micromap convertMapIn  = inputMap;
-    micromesh::Micromap convertMapOut = inputMap;
-
-    values_unorm11.resize(inputMap.values.count);
+    micromesh::Micromap convertMapIn  = uncompressedMap;
+    micromesh::Micromap convertMapOut = uncompressedMap;
 
     convertMapOut.values.byteStride = sizeof(uint16_t);
     convertMapOut.values.format     = micromesh::Format::eR11_unorm_pack16;
-    convertMapOut.values.count      = inputMap.values.count;
-    convertMapOut.values.data       = values_unorm11.data();
+
+    // eR11_unorm_packed_align32 uses byte offsets, need index offsets in output
+    if(convertMapIn.values.format == micromesh::Format::eR11_unorm_packed_align32)
+    {
+      // we pull subdiv levels from original inputmap
+      // but need new value index offsets as well as value count
+      values_offsets.resize(triangleCount);
+      convertMapOut.triangleValueIndexOffsets = micromesh::ArrayInfo_uint32(values_offsets.data(), triangleCount);
+      micromesh::micromeshMicromapSetupValues(&convertMapOut, true);
+    }
+    else
+    {
+      convertMapOut.values.count = inputMap.uncompressed.values.count;
+    }
+
+    values_unorm11.resize(convertMapOut.values.count);
+    convertMapOut.values.data = values_unorm11.data();
 
     // if we are coming from float, convert to quantized
     // use provided meshMinMaxs pointer if available otherwise
@@ -105,6 +119,11 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
       inputConvert.globalMin.value_float[0] = floatValueMin;
       inputConvert.globalMax.value_float[0] = floatValueMax;
       result = micromesh::micromeshOpFloatToQuantized(ctx, &inputConvert, &convertMapOut);
+    }
+    else if(convertMapIn.values.format == micromesh::Format::eR11_unorm_packed_align32)
+    {
+      assert(inputMap.type == micromesh::MicromapType::ePacked);
+      result = micromesh::micromeshOpUnpack(ctx, &inputMap.packed, &convertMapOut);
     }
     else
     {
@@ -154,7 +173,7 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
     for(uint32_t i = 0; i < triangleCount; i++)
     {
       // u32/u16 works only on little endian systems
-      uint16_t subdivLevel        = micromesh::arrayGetV<uint16_t>(inputMap.triangleSubdivLevels, i);
+      uint16_t subdivLevel        = micromesh::arrayGetV<uint16_t>(uncompressedMap.triangleSubdivLevels, i);
       bool     needMip            = subdivLevel >= mipSettings->minSubdiv;
       mipTriangles[i].subdivLevel = needMip ? mipSettings->mipSubdiv : settings.mipIgnoredSubdivLevel;
       mipTriangles[i].mipOffset   = mipOffset;
@@ -320,7 +339,7 @@ micromesh::Result baryBasicDataCompressedAppend(baryutils::BaryBasicData&       
 
     for(uint32_t i = 0; i < triangleCount; i++)
     {
-      const bary::Triangle&          tri    = baryCompressed.triangles[i + baryGroupCompressed.triangleFirst];
+      const bary::Triangle& tri = baryCompressed.triangles[i + baryGroupCompressed.triangleFirst];
       bary::TriangleUncompressedMip& triMip = mipBaryMisc->triangleUncompressedMips[i + baryGroupCompressed.triangleFirst];
       if((mipSettings->skipBlockFormatBits & (1u << uint32_t(tri.blockFormatDispC1))) != 0)
       {
@@ -437,7 +456,7 @@ static micromesh::Result decodeBlockInto(const uint8_t*                         
   settings.decompressedFormat          = micromesh::Format::eR11_unorm_pack16;
   settings.subdivLevel                 = blockLevel.subdivLevel;
   micromesh::Result result             = micromesh::micromeshLayoutInitStandard(&settings.decompressedLayout,
-                                                                    microutils::getMicromeshLayoutType(blockLevel.layout));
+                                                                                microutils::getMicromeshLayoutType(blockLevel.layout));
   assert(result == micromesh::Result::eSuccess);
   if(result != micromesh::Result::eSuccess)
   {
@@ -564,7 +583,7 @@ micromesh::Result baryMiscDataSetupMips(baryutils::BaryMiscData&       mip,
       const bary::Triangle& tri = basicCompressed.triangles[triGlobalIdx];
       if((settings.skipBlockFormatBits & (1u << uint32_t(tri.blockFormatDispC1))) == 0 && tri.subdivLevel >= settings.minSubdiv)
       {
-        mip.triangleUncompressedMips[triGlobalIdx].mipOffset   = mipTotalBytes - groupMip.mipFirst;
+        mip.triangleUncompressedMips[triGlobalIdx].mipOffset = mipTotalBytes - groupMip.mipFirst;
         mip.triangleUncompressedMips[triGlobalIdx].subdivLevel = std::min(settings.mipSubdiv, uint32_t(tri.subdivLevel));
         mipTotalBytes += mipEntrySize;
       }

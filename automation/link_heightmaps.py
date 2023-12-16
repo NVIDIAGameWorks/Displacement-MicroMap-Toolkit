@@ -30,12 +30,19 @@ parser.add_argument('--filter', nargs='+', help='Regex for material names to cha
 parser.add_argument('--filter-out', nargs='+', help='Regex for material names to ignore')
 parser.add_argument('--copy-from', type=pathlib.Path, help='Source gltf file to use as a template. Takes precedence over the image filename search.')
 parser.add_argument('--match-one-image', action='store_true', help='A heightmap will be matched to an image and only added to materials sharing that image. Reduces false positives.')
+parser.add_argument('--match-one-material', action='store_true', help='Match a heightmap to at most one material, even if a color texture is shared by multiple materials.')
+parser.add_argument('--heightmap-regex', default=r'height|disp', help='Override the default regex for detecting heightmap-ish filenames')
+parser.add_argument('--image-name-weight', type=float, default=1.0, help='Weight given to the similarity of other images in a material')
+parser.add_argument('--material-name-weight', type=float, default=0.1, help='Weight given to the similarity of the material name')
+parser.add_argument('--match-materials-only', action='store_true', help='Match material names even if they have no other textures.')
 #parser.add_argument('--heightmaps', nargs='+', type=pathlib.Path, help='Provide heightmap names explicitly in the order of materials')
 args = parser.parse_args()
 
+imageSuffixes = set(['.png', '.jpg', '.exr', '.bmp'])
+
 # Return true if the filename could be a heightmap
 def heightmapishName(name):
-    return re.search(r'height|disp', name, re.IGNORECASE)
+    return re.search(args.heightmap_regex, name, re.IGNORECASE)
 
 def find_in_object(obj, target_name, depth):
     if target_name in obj:
@@ -65,13 +72,15 @@ def find_ids(data, object_name, target_names, target_id):
 def heightmapMatchMetric(candidate, image, material_names):
     candidate_name = str(candidate.relative_to(filepath.parent))
     # Helps when height or displacement is a common term for all textures
-    heightmap_terms = re.findall(r'height|disp', candidate_name, re.IGNORECASE)
+    heightmap_terms = re.findall(args.heightmap_regex, candidate_name, re.IGNORECASE)
+    # Remove the heightmap terms so they don't interfere with matching
+    candidate_name = re.sub(args.heightmap_regex, '_', candidate_name)
     image_name = str(image.relative_to(filepath.parent))
     image_seq = SequenceMatcher(None, candidate_name, image_name)
     image_similarity = image_seq.ratio()
     match_seq = SequenceMatcher(None, candidate_name.lower(), '$'.join(material_names).lower())
     material_similarity = match_seq.ratio()
-    score = image_similarity + material_similarity * 0.1 + len(heightmap_terms)
+    score = image_similarity * args.image_name_weight + material_similarity * args.material_name_weight + len(heightmap_terms)
     if args.verbose:
         print('Image similarity score {} (filename {}, material name {}, heightmap terms {}):'.format(score, image_similarity, material_similarity * 0.1, len(heightmap_terms)))
         print('  {}'.format(candidate_name))
@@ -80,6 +89,14 @@ def heightmapMatchMetric(candidate, image, material_names):
         print('  heightmap terms: {}'.format(", ".join(heightmap_terms)))
         print()
     return score
+
+# Returns material_ids, in descending order of their material names' similarity
+# to the candidate file name
+def orderMaterialSimilarity(candidate, materials, material_ids):
+    candidate_name = str(candidate.relative_to(filepath.parent))
+    candidate_name = re.sub(args.heightmap_regex, '_', candidate_name)
+    sorted_pairs = sorted((SequenceMatcher(None, candidate_name, materials[material_id]['name']).ratio(), material_id) for material_id in material_ids)
+    return [pair[1] for pair in reversed(sorted_pairs)]
 
 def filterMaterialName(material_name):
     if args.filter and not any(re.search(pattern, material_name) for patterrn in args.filter):
@@ -111,6 +128,7 @@ for filepath in args.gltf:
         path = filepath.parent / urllib.parse.unquote(uri)
         #if args.verbose: print('Existing image {}'.format(path))
         images.add(path)
+        imageSuffixes.add(path.suffix)
         image_ids[path] = id
 
     image_types = set()
@@ -147,7 +165,7 @@ for filepath in args.gltf:
         if args.verbose: print('Searching "{}"...'.format(str(dir)))
         for file in os.listdir(dir):
             candidate = dir / file
-            if image.suffix == candidate.suffix and candidate not in images and heightmapishName(file):
+            if candidate.suffix in imageSuffixes and candidate not in images and heightmapishName(file):
                 if args.verbose: print('Found candidate {}'.format(str(candidate)))
                 candidates.add(candidate)
 
@@ -160,6 +178,18 @@ for filepath in args.gltf:
             material_ids = image_material_ids[image]
             material_names = list(data['materials'][material_id]['name'] for material_id in material_ids)
             matches += [(heightmapMatchMetric(candidate, image, material_names), candidate, image, material_ids)]
+
+        # HACK: this script started with only trying to match other texture
+        # names. It's entirely possible there are no textures but material (and
+        # even mesh) names would be fine matches. This quick workaround adds
+        # "null" images so that material names can still be matched. This script
+        # should really be rewritten more hollistically.
+        if args.match_materials_only:
+            all_material_ids = range(len(data['materials']))
+            fake_image = filepath.parent / "null"
+            for material_id in all_material_ids:
+                material_names = [data['materials'][material_id]['name']]
+                matches += [(heightmapMatchMetric(candidate, fake_image, material_names), candidate, fake_image, [material_id])]
 
     # Assume the most similar heightmap names belong to the same materials as existing images in a greedy fashion
     unlinked_heightmaps = []
@@ -174,7 +204,7 @@ for filepath in args.gltf:
             elif not warn_multiple_matches:
                 warn_multiple_matches = True
                 print("Warning: adding the same heightmap multiple times consider enabling '--match-one-image'", file=sys.stderr)
-        for material_id in set(material_ids) - unlinked_material_ids:
+        for material_id in orderMaterialSimilarity(heightmap, data['materials'], set(material_ids) - unlinked_material_ids):
             unlinked_material_ids.add(material_id)
 
             # Filter out materials with existing displacement
@@ -200,6 +230,9 @@ for filepath in args.gltf:
             material_name = data['materials'][material_id]['name']
             unlinked_heightmaps += [(material_id, material_name, heightmap, image, sampler_id)]
             best_image[heightmap.name] = image
+
+            if args.match_one_image:
+                break
 
     had_changes = False
 

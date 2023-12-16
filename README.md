@@ -204,18 +204,14 @@ tools. It relies on `VK_NV_mesh_shader` to allow rasterized display of
 micromeshes. `VK_KHR_acceleration_structure` is required for baking micromaps.
 If available, `VK_NV_displacement_micromap` is used to render micromeshes with
 raytracing when choosing *Rendering -> RTX*. `VK_NV_displacement_micromap` was
-introduced with the Ada Lovelace architecture based GPUs. If you see a message
-about the missing extension, update to the latest driver (note: beta drivers are
-available at https://developer.nvidia.com/vulkan-driver).
+introduced with the RTX 40 Series Ada Lovelace architecture based GPUs. Previous
+RTX cards have support, but performance will be better with Ada. If you see a
+message about the missing extension, update to the latest driver (note: beta
+drivers are available at https://developer.nvidia.com/vulkan-driver).
 
-> The rasterization of micromeshes, especially compressed is a bit of
-  a more complex topic on its own. Therefore there will be a future
-  dedicated sample that goes into the details of how it works
-  and showcases more features, such as dynamic level-of-detail.
-  We recommend to wait for this, rather than attempt to
-  embed the code from the toolbox. The future sample will also
-  provide more performant solutions and address compute-based
-  rasterization as well.
+> The rasterization of micromeshes, especially compressed, is a bit of
+  a more complex topic on its own. A dedicated sample is available at
+  https://github.com/nvpro-samples/vk_displacement_micromaps.
 
 > At the time of writing `VK_NV_displacement_micromap` is in beta still, meaning
   the extension is subject to changes. Do not use its headers here in production
@@ -266,7 +262,23 @@ from an original input mesh in the [Micro-Mesh Asset Pipeline
 slide-deck](https://developer.download.nvidia.com/ProGraphics/nvpro-samples/slides/Micro-Mesh_Asset_Pipeline.pdf)
 as well as in [docs/asset_pipeline.md](docs/asset_pipeline.md)
 
-## About the Latest Release (1.1)
+## About the Latest Release
+
+Version 1.2
+
+- Add eR11_unorm_packed_align32 support in meshopsOpCompressDisplacementMicromaps()
+- Add micromesh_tool --normal-textures-stem to generate normal maps
+- The micromesh_tool --resample-resolution argument now takes a 2D resolution
+- Faceted shading option when raytracing, or when missing normal maps
+- Update to the latest nvpro_core
+- Use heightmap_rtx to preview heightmap displacement when raytracing
+- Write textures in parallel when saving scenes
+- Fix baking heightmaps from base mesh materials - now using reference mesh
+- Fix support for loading \*.exr heightmaps
+- Filter outliers for dynamic range when using --height-textures-stem (experimental)
+- SW texture interpolation to preview heightmap displacement with rasterization
+
+Version 1.1
 
 - Heightmap rendering in micromesh_toolkit with dynamic LOD
 - Memory estimate for baking high resolution heightmaps in batches

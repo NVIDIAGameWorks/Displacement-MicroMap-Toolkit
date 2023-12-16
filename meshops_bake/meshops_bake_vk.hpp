@@ -22,10 +22,7 @@
 
 namespace meshops {
 
-// TODO: (glm?) compile errors without namespaces
-namespace glsl_shared {
 #include "shaders/host_device.h"
-}  // namespace glsl_shared
 
 struct PipelineContainer
 {
@@ -68,7 +65,7 @@ struct BakerPipeline
 {
   void create(VkDevice device, VkBuffer sceneDescBuf, VkAccelerationStructureKHR referenceSceneTlas);
   void destroy(VkDevice device);
-  void run(meshops::ContextVK& vk, const meshops::OpBake_input& input, glsl_shared::BakerPushConstants& pushConstants, bool finalBatch);
+  void run(meshops::ContextVK& vk, const meshops::OpBake_input& input, shaders::BakerPushConstants& pushConstants, bool finalBatch);
 
   PipelineContainer   pipeline;
   DescriptorContainer descriptor;
@@ -83,11 +80,11 @@ struct ResamplerPipeline
               const std::vector<VkDescriptorImageInfo>& outputTextures,
               const std::vector<VkDescriptorImageInfo>& distanceTextures);
   void destroy(VkDevice device);
-  void run(meshops::ContextVK&              vk,
-           const meshops::OpBake_input&     input,
-           ArrayView<meshops::Texture>      outputTextures,
-           glsl_shared::BakerPushConstants& pushConstants,
-           nvvk::Buffer&                    triangleMinMaxBuf);
+  void run(meshops::ContextVK&          vk,
+           const meshops::OpBake_input& input,
+           ArrayView<meshops::Texture>  outputTextures,
+           shaders::BakerPushConstants& pushConstants,
+           nvvk::Buffer&                triangleMinMaxBuf);
 
   PipelineContainer   pipeline;
   DescriptorContainer descriptor;
@@ -145,12 +142,12 @@ private:
 
   BakerMeshVK  m_baseVk;
   nvvk::Buffer m_distanceBuf;        // baker result - a linear array of floats
-  nvvk::Buffer m_trianglesBuf;       // per-triangle microvertex offsets, glsl_shared::Triangle
+  nvvk::Buffer m_trianglesBuf;       // per-triangle microvertex offsets, shaders::Triangle
   nvvk::Buffer m_triangleMinMaxBuf;  // per-triangle direction-length-relative displacement distance (min, max) pairs
   std::vector<nvvk::Buffer> m_baryCoordBuf;  // Micro-triangle coordinates in bary space
 
   // Shader push constants. These persist between calls to bakeAndResample().
-  glsl_shared::BakerPushConstants m_push;
+  shaders::BakerPushConstants m_push;
 };
 
 }  // namespace meshops

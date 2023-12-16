@@ -28,6 +28,7 @@
 #include <tiny_gltf.h>
 #include <nvh/nvprint.hpp>
 #include <nvh/boundingbox.hpp>
+#include "nvh/parallel_work.hpp"
 #include <tiny_obj_loader.h>
 #include <fileformats/tiny_converter.hpp>
 #include <gltf/NV_micromesh_extension_types.hpp>
@@ -618,24 +619,28 @@ bool ToolScene::save(const fs::path& filename)
 
   // Save all the images. If there is no relative filename, it must have come
   // from an embedded gltf image and should be returned there.
-  for(auto& image : m_images)
-  {
-    // Ignore failures. Errors will be printed.
-    (void)image->save(basePath, image->relativePath());
-  }
+  nvh::parallel_batches<1>(
+      m_images.size(),
+      [this, &basePath](uint64_t i) {
+        // Ignore failures. Errors will be printed.
+        (void)m_images[i]->save(basePath, m_images[i]->relativePath());
+      },
+      std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(m_images.size())));
 
   // Save all the aux images, which are not referenced by the gltf.
-  for(auto& image : m_auxImages)
-  {
-    // Ignore failures. Errors will be printed.
-    (void)image->save(basePath, image->relativePath());
+  nvh::parallel_batches<1>(
+      m_auxImages.size(),
+      [this, &basePath](uint64_t i) {
+        // Ignore failures. Errors will be printed.
+        (void)m_auxImages[i]->save(basePath, m_auxImages[i]->relativePath());
 
-    if(image->relativePath().empty())
-    {
-      assert(false);
-      LOGE("Error: auxiliary image has no path and will not be be embedded\n");
-    }
-  }
+        if(m_auxImages[i]->relativePath().empty())
+        {
+          assert(false);
+          LOGE("Error: auxiliary image has no path and will not be be embedded\n");
+        }
+      },
+      std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(m_auxImages.size())));
 
   // If any mesh attributes were generated, we need to re-create the gltf model,
   // combining both the original and the new data.

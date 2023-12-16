@@ -309,6 +309,17 @@ bool toolBake(micromesh_tool::ToolContext&                context,
   managerConfig.quaternionTexturesStem = args.quaternionTexturesStem;
   managerConfig.offsetTexturesStem     = args.offsetTexturesStem;
   managerConfig.heightTexturesStem     = args.heightTexturesStem;
+  managerConfig.normalTexturesStem     = args.normalTexturesStem;
+  // Sanitize negative resolutions
+  if(managerConfig.resampleResolution.x < 0 || managerConfig.resampleResolution.y < 0)
+  {
+    managerConfig.resampleResolution = {0, 0};
+  }
+  // Make the size square if only one value is given
+  if(managerConfig.resampleResolution.y == 0)
+  {
+    managerConfig.resampleResolution.y = managerConfig.resampleResolution.x;
+  }
   if(!bakerManager.generateInstructions(managerConfig, &reference, base, resampleInstructions))
   {
     LOGE("BakerManager::generateInstructions() failed\n");
@@ -360,10 +371,13 @@ bool toolBake(micromesh_tool::ToolContext&                context,
   std::vector<size_t>                     baryGroupToMeshIndex;
   for(size_t meshIndex = 0; meshIndex < base->meshes().size(); ++meshIndex)
   {
-    LOGI("Mesh %zu/%zu\n", meshIndex + 1, base->meshes().size());
-
     const std::unique_ptr<ToolMesh>&       baseMesh      = base->meshes()[meshIndex];
     const std::unique_ptr<const ToolMesh>& referenceMesh = reference.meshes()[meshIndex];
+
+    int32_t     baseMaterialIndex = baseMesh->relations().material;
+    std::string baseMaterialName  = baseMaterialIndex != -1 ? base->materials()[baseMaterialIndex].name : "none";
+    LOGI("Mesh %zu/%zu (%s, material %s)\n", meshIndex + 1, base->meshes().size(), baseMesh->meta().name.c_str(),
+         baseMaterialName.c_str());
 
     // Create some temporary reference mesh data storage. Some attributes, such
     // as triangleSubdivLevels, may need to be generated for baking, but it
@@ -381,7 +395,7 @@ bool toolBake(micromesh_tool::ToolContext&                context,
     heightmapDesc.pnTriangles                   = args.heightmapPNtriangles;
     int                                        heightmapImageIndex;
     std::unique_ptr<micromesh_tool::ToolImage> heightmapOverride;
-    micromesh_tool::ToolImage*                 heightmapImage{};
+    const micromesh_tool::ToolImage*           heightmapImage{};
     if(!referenceView.triangleSubdivisionLevels.empty())
     {
       heightmapDesc.maxSubdivLevel =
@@ -406,7 +420,7 @@ bool toolBake(micromesh_tool::ToolContext&                context,
       heightmapDesc.bias   = biasScale.bias;
       heightmapDesc.scale  = biasScale.scale;
 
-      heightmapImage = base->images()[heightmapImageIndex].get();
+      heightmapImage = reference.images()[heightmapImageIndex].get();
     }
     // Load the heightmap, if there is one
     if(heightmapImage)

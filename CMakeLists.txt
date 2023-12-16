@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.13 FATAL_ERROR)
 cmake_policy(SET CMP0079 NEW) # Allow linking with targets in other directories
 project(
     micromesh_toolkit
-    VERSION 1.1
+    VERSION 1.2
     DESCRIPTION "Micromesh Tools"
     LANGUAGES C CXX)
 
@@ -58,8 +58,7 @@ endif()
 #--------------------------------------------------------------------------------------------------
 # Package shared by all projects
 
-# set(SUPPORT_AFTERMATH on)
-# _add_package_NsightAftermath()
+_add_package_NsightAftermath()
 _add_package_ZLIB()
 _add_package_VulkanSDK()
 _add_package_ShaderC()
@@ -141,6 +140,7 @@ target_link_libraries(png_static zlibstatic)
 target_include_directories(png_static PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/external/libpng> ${CMAKE_CURRENT_LIST_DIR}/external/libpng)
 ###
 add_subdirectory(external/tinyexr)
+add_subdirectory(external/heightmap_rtx)
 add_subdirectory(meshops_core)
 add_subdirectory(meshops_bake)
 add_subdirectory(meshops_remesher)

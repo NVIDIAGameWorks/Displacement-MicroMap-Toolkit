@@ -54,6 +54,21 @@ void main()
   vec3              toEye;
   rasterLoad(IN.pos, IN.bary, gl_PrimitiveID, gltfMat, pinfo, triInfo, hit, toEye);
 
+  hit.pos    = IN.pos;
+  hit.geonrm = normalize(-cross(dFdx(IN.pos), dFdy(IN.pos)));
+  if(!gl_FrontFacing)
+  {
+    hit.geonrm = -hit.geonrm;
+  }
+
+  // Meshes with micromaps usually includes normal maps. Without them, displaced
+  // geometry will be shaded flat. If the mesh has none, use microtriangle face
+  // normals instead.
+  if(CONST_SHADE_MODE == eRenderShading_default && gltfMat.normalTexture == -1)
+  {
+    hit.nrm = hit.geonrm;
+  }
+
   float NdotL = dot(hit.nrm, toEye);
 
   if(CONST_SHADE_MODE == eRenderShading_anisotropy)
@@ -79,8 +94,6 @@ void main()
   }
   else
   {
-    hit.pos    = IN.pos;
-    hit.geonrm = normalize(-cross(dFdx(IN.pos), dFdy(IN.pos)));
     outColor   = rasterShade(IN.bary, gltfMat, pinfo, triInfo, hit, toEye, gl_PrimitiveID);
   }
 }

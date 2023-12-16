@@ -134,6 +134,10 @@ void uiBaker(tool_bake::ToolBakeArgs& bake_args, ViewerSettings::GlobalToolSetti
       "Height Textures Stem",
       [&]() { return ImGuiH::InputText("##OTS", &bake_args.heightTexturesStem, ImGuiInputTextFlags_None); },
       "Add text here to generate a heightmap texture named {text}.{mesh index}.png for each mesh.");
+  PE::entry(
+      "Normal Textures Stem",
+      [&]() { return ImGuiH::InputText("##OTS", &bake_args.normalTexturesStem, ImGuiInputTextFlags_None); },
+      "Add text here to generate a normalmap texture named {text}.{mesh index}.png for each mesh.");
 
   // Resampling
   {
@@ -157,9 +161,9 @@ void uiBaker(tool_bake::ToolBakeArgs& bake_args, ViewerSettings::GlobalToolSetti
     if(bake_args.texturesToResample != tool_bake::TexturesToResample::eNone)
     {
       PE::entry(
-          "Resample Resolution", [&]() { return ImGui::InputInt("Resample Resolution", &bake_args.resampleResolution); },
-          "The resolution in pixels of each side of each of the output resampled textures. 0 means the resampler "
-          "will "
+          "Resample Resolution",
+          [&]() { return ImGui::InputInt("Resample Resolution", &bake_args.resampleResolution.x); },
+          "The resolution in pixels of each side of each of the output resampled textures. 0 means the resampler will "
           "try to match the resolutions of the inputs.");
 
       // GUI for `resampleExtraTextures`; this is a variable-length vector!

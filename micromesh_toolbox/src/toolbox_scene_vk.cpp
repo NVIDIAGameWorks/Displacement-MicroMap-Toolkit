@@ -70,7 +70,7 @@ void ToolboxSceneVk::create(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn)
   }
 
   // Buffer references
-  SceneDescription scene_desc{};
+  shaders::SceneDescription scene_desc{};
   scene_desc.materialAddress           = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bMaterial.buffer);
   scene_desc.deviceMeshInfoAddress     = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceMeshInfo.buffer);
   scene_desc.deviceBaryInfoAddress     = nvvk::getBufferDeviceAddress(m_ctx->m_device, m_bDeviceBaryInfo.buffer);
@@ -79,7 +79,7 @@ void ToolboxSceneVk::create(VkCommandBuffer cmd, micromesh_tool::ToolScene& scn)
   scene_desc.splitPartsIndicesAddress  = m_micromeshSplitPartsVK.triangleIndices.addr;
 
   auto lock    = GetVkQueueOrAllocatorLock();
-  m_bSceneDesc = m_alloc->createBuffer(cmd, sizeof(SceneDescription), &scene_desc,
+  m_bSceneDesc = m_alloc->createBuffer(cmd, sizeof(shaders::SceneDescription), &scene_desc,
                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
   m_dutil->DBG_NAME(m_bSceneDesc.buffer);
 }
@@ -96,12 +96,12 @@ void ToolboxSceneVk::createMaterialBuffer(VkCommandBuffer cmd, const micromesh_t
   scene_materials.importMaterials(scn.model());
 
   // The material on the GPU is slightly different/smaller
-  std::vector<GltfShadeMaterial> shade_materials;
+  std::vector<shaders::GltfShadeMaterial> shade_materials;
   shade_materials.reserve(scene_materials.m_materials.size());
 
   // Lambda to convert from nvh::GltfMaterial to the GPU version
   auto convertMaterial = [](const nvh::GltfMaterial& m) {
-    GltfShadeMaterial s{};
+    shaders::GltfShadeMaterial s{};
     s.emissiveFactor               = m.emissiveFactor;
     s.emissiveTexture              = m.emissiveTexture;
     s.khrDiffuseFactor             = m.specularGlossiness.diffuseFactor;
@@ -129,7 +129,7 @@ void ToolboxSceneVk::createMaterialBuffer(VkCommandBuffer cmd, const micromesh_t
   // Converting all materials
   for(const auto& m : scene_materials.m_materials)
   {
-    GltfShadeMaterial s = convertMaterial(m);
+    shaders::GltfShadeMaterial s = convertMaterial(m);
     shade_materials.push_back(s);
   }
 
@@ -160,11 +160,11 @@ void ToolboxSceneVk::createInstanceInfoBuffer(VkCommandBuffer cmd, const microme
 
   const std::vector<micromesh_tool::ToolScene::Instance>& instances = scn.instances();
 
-  std::vector<InstanceInfo> inst_info;
+  std::vector<shaders::InstanceInfo> inst_info;
   inst_info.reserve(instances.size());
   for(const auto& instance : instances)
   {
-    InstanceInfo info{};
+    shaders::InstanceInfo info{};
     info.objectToWorld = instance.worldMatrix;
     info.worldToObject = nvmath::invert(instance.worldMatrix);
     info.materialID    = scn.meshes()[instance.mesh]->relations().material;
@@ -247,13 +247,13 @@ bool ToolboxSceneVk::createDeviceMeshBuffer(VkCommandBuffer cmd, micromesh_tool:
     }
   }
 
-  std::vector<DeviceMeshInfo> device_mesh_infos;
+  std::vector<shaders::DeviceMeshInfo> device_mesh_infos;
   device_mesh_infos.reserve(m_deviceMeshes.size());
   for(size_t i = 0; i < m_deviceMeshes.size(); ++i)
   {
-    auto&                  mesh   = m_deviceMeshes[i];
-    meshops::DeviceMeshVK* meshVk = meshops::meshopsDeviceMeshGetVK(mesh);
-    DeviceMeshInfo         info{};
+    auto&                   mesh   = m_deviceMeshes[i];
+    meshops::DeviceMeshVK*  meshVk = meshops::meshopsDeviceMeshGetVK(mesh);
+    shaders::DeviceMeshInfo info{};
     info.triangleVertexIndexBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->triangleVertexIndexBuffer.buffer);
     info.triangleAttributesBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->triangleAttributesBuffer.buffer);
     info.vertexPositionNormalBuffer = nvvk::getBufferDeviceAddress(m_ctx->m_device, meshVk->vertexPositionNormalBuffer.buffer);
@@ -301,7 +301,7 @@ bool ToolboxSceneVk::createDeviceBaryBuffer(VkCommandBuffer cmd, nvvk::Context::
     usageFlags |= eDeviceMicromeshUsageRaytracingBit;
   }
 
-  std::vector<DeviceBaryInfo> deviceBaryInfos;
+  std::vector<shaders::DeviceBaryInfo> deviceBaryInfos;
   deviceBaryInfos.reserve(m_barys.size());
   for(int32_t baryIndex = 0; baryIndex < static_cast<int32_t>(scn.barys().size()); ++baryIndex)
   {
@@ -314,7 +314,7 @@ bool ToolboxSceneVk::createDeviceBaryBuffer(VkCommandBuffer cmd, nvvk::Context::
       // Build a structure of addresses to reference the ToolMicromap data in
       // shaders. These are linearized, so m_deviceBaryInfoMap is created to
       // refer back to them given a bary and group index.
-      DeviceBaryInfo info{};
+      shaders::DeviceBaryInfo info{};
 
       // Add a DeviceMicromap to the DeviceBary for every ToolBary's group
       const bary::ContentView& groupView     = toolBary->groups()[baryGroup];
@@ -371,13 +371,14 @@ nvvk::Buffer ToolboxSceneVk::createWatertightIndicesBuffer(VkCommandBuffer      
                                                            const meshops::MeshTopologyData&         topology)
 {
   // Default to no edge sanitization
-  WatertightIndices ignored{/*.seamEdge =*/{ivec2{WATERTIGHT_INDICES_INVALID_VERTEX}, ivec2{WATERTIGHT_INDICES_INVALID_VERTEX},
-                                            ivec2{WATERTIGHT_INDICES_INVALID_VERTEX}},
-                            /*.padding_ =*/{},
-                            /*.watertightCornerVertex =*/ivec3{WATERTIGHT_INDICES_INVALID_VERTEX},
-                            /*.adjacentTriangles =*/ivec3{WATERTIGHT_INDICES_INVALID_VERTEX}};
+  shaders::WatertightIndices ignored{/*.seamEdge =*/{nvmath::vec2i{WATERTIGHT_INDICES_INVALID_VERTEX},
+                                                     nvmath::vec2i{WATERTIGHT_INDICES_INVALID_VERTEX},
+                                                     nvmath::vec2i{WATERTIGHT_INDICES_INVALID_VERTEX}},
+                                     /*.padding_ =*/{},
+                                     /*.watertightCornerVertex =*/nvmath::vec3i{WATERTIGHT_INDICES_INVALID_VERTEX},
+                                     /*.adjacentTriangles =*/nvmath::vec3i{WATERTIGHT_INDICES_INVALID_VERTEX}};
 
-  std::vector<WatertightIndices> triInfos(indices.size(), ignored);
+  std::vector<shaders::WatertightIndices> triInfos(indices.size(), ignored);
 
   meshops::ArrayView<const micromesh::Vector_uint32_3> triVertices(indices);
   meshops::ArrayView<const micromesh::Vector_uint32_3> triVerticesWt(topology.triangleVertices);
@@ -388,7 +389,7 @@ nvvk::Buffer ToolboxSceneVk::createWatertightIndicesBuffer(VkCommandBuffer      
   // We only do this if triangles have a been split due to different normals/UVs.
   for(uint32_t triIdx = 0; triIdx < static_cast<uint32_t>(triVertices.size()); ++triIdx)
   {
-    WatertightIndices& triInfo = triInfos[triIdx];
+    shaders::WatertightIndices& triInfo = triInfos[triIdx];
 
     // If the watertight vertex ID is different to the regular one, get the shader to use that for corner vertices
     micromesh::Vector_uint32_3 tri   = triVertices[triIdx];

@@ -18,13 +18,11 @@
 
 //////////////////////////////////////////////////////////////////////////
 
-// PLEASE READ:
-// The rasterization of micromeshes, especially compressed is a bit of
-// a more complex topic on its own. Therefore there will be a future
-// dedicated sample that goes into details how it works
-// and showcases more features, such as dynamic level-of-detail.
-// We recommend to wait for this, rather than attempt to
-// embed the code from the toolkit.
+/*
+ * NOTE: This file's content is based on older versions of code in
+ *       https://github.com/nvpro-samples/vk_displacement_micromaps. Please
+ *       follow micromesh rasterization examples there instead.
+ */
 
 // Data structures to render block-compressed barycentric micromesh displacements.
 

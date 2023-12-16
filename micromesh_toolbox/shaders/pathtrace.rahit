@@ -45,7 +45,7 @@ layout(push_constant) uniform RtxPushConstant_ { PushConstant pc; };
 
   // clang-format on
 
-#include "nvvkhl/shaders/mat_eval.glsl"
+#include "mat_eval.glsl"
 
 
 hitAttributeEXT vec2 attribs;

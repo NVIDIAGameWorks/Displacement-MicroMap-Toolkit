@@ -10,6 +10,9 @@
 	path = external/libpng
 	url = https://git.code.sf.net/p/libpng/code
 	shallow = true
+[submodule "external/heightmap_rtx"]
+       path = external/heightmap_rtx
+       url = https://github.com/NVIDIAGameWorks/heightmap_rtx.git
 [submodule "external/Displacement-MicroMap-SDK"]
 	path = external/Displacement-MicroMap-SDK
 	url = ../Displacement-MicroMap-SDK.git

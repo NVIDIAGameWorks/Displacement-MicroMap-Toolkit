@@ -11,7 +11,7 @@
  */
 
 #include "ui_raster.hpp"
-#include "imgui_helper.h"
+#include "imgui/imgui_helper.h"
 #include "toolbox_viewer.hpp"
 #include "ui_color_picker.hpp"
 

@@ -68,6 +68,7 @@ target_link_libraries (${PROJECT_NAME}
     meshops_bake
     meshops_core
     meshops_remesher
+    heightmap_rtx
     ) 
 
 

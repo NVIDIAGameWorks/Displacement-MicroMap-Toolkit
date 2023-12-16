@@ -97,7 +97,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE PROJECT_NAME="${PROJECT_NAME}
 target_sources(${PROJECT_NAME} PRIVATE ${COMMON_SOURCE_FILES})
 source_group("nvpro_core"     FILES ${COMMON_SOURCE_FILES})
 
-target_link_libraries(${PROJECT_NAME} micromesh_tool_lib)
+target_link_libraries(${PROJECT_NAME} micromesh_tool_lib ${LIBRARIES_OPTIMIZED})
 
 # Extra
 install(TARGETS ${PROJECT_NAME})

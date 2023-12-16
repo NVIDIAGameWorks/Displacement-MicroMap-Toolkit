@@ -14,6 +14,8 @@
 #define DH_SCN_DESC_H 1
 
 #ifdef __cplusplus
+#include <nvmath/nvmath.h>
+namespace shaders {
 using mat4  = nvmath::mat4f;
 using vec4  = nvmath::vec4f;
 using vec3  = nvmath::vec3f;
@@ -153,5 +155,9 @@ struct GltfShadeMaterial
   int   alphaMode;
   float alphaCutoff;
 };
+
+#ifdef __cplusplus
+}  // namespace shaders
+#endif
 
 #endif

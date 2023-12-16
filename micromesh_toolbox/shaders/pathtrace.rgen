@@ -30,8 +30,6 @@
 #include "nvvkhl/shaders/dh_sky.h"
 #include "nvvkhl/shaders/ggx.glsl"
 #include "nvvkhl/shaders/ray_util.glsl"
-#include "nvvkhl/shaders/pbr_mat_struct.h"
-#include "nvvkhl/shaders/pbr_eval.glsl"
 
 #include "nvvkhl/shaders/dh_hdr.h"
 
@@ -55,10 +53,11 @@ layout(set = 3, binding = eHdr) uniform sampler2D hdrTexture;
 
 // clang-format on
 
-#include "nvvkhl/shaders/mat_eval.glsl"
+#include "mat_eval.glsl"
+#include "pbr_eval.glsl"
 #include "nvvkhl/shaders/hdr_env_sampling.glsl"
 #include "nvvkhl/shaders/light_contrib.glsl"
-#include "nvvkhl/shaders/lighting.glsl"
+#include "lighting.glsl"
 
 
 layout(push_constant) uniform RtxPushConstant_
@@ -138,7 +137,6 @@ vec3 pathTrace(Ray r, inout uint seed)
       return radiance;
     }
 
-
     // Retrieve the Instance buffer information
     InstanceInfos pInfo_ = InstanceInfos(sceneDesc.instInfoAddress);
     InstanceInfo  pInfo  = pInfo_.i[payload.instanceIndex];
@@ -147,8 +145,24 @@ vec3 pathTrace(Ray r, inout uint seed)
     PbrMaterial       pbrMat;
     int               matIndex  = max(0, pInfo.materialID);  // material of primitive mesh
     GltfShadeMaterial matetrial = materials.m[matIndex];
-    pbrMat                      = evaluateMaterial(matetrial, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
 
+    // Use the face normal for faceted shading. Also, meshes with micromaps
+    // usually includes normal maps. Without them, displaced geometry will be
+    // shaded flat. If the hit was a micromesh and it has none, use face normals
+    // instead.
+    if(CONST_SHADE_MODE == eRenderShading_faceted
+       || (payload.micromesh && CONST_SHADE_MODE == eRenderShading_default && matetrial.normalTexture == -1))
+    {
+      hit.nrm = hit.geonrm;
+    }
+
+    pbrMat = evaluateMaterial(matetrial, hit.nrm, hit.tangent, hit.bitangent, hit.uv);
+
+    // Use a constant grey for faceted shading to match rasterization
+    if(CONST_SHADE_MODE == eRenderShading_faceted)
+    {
+      pbrMat.albedo = vec4(0.2);
+    }
 
     // Adding emissive
     radiance += pbrMat.emissive * throughput;

@@ -179,7 +179,7 @@ private:
     }
     catch(std::exception ex)
     {
-      return 0.F;
+      return 0ULL;
     }
   }
 

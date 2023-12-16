@@ -148,9 +148,9 @@ private:
   std::future<bool> m_loadingHdr;
 
   // Pipeline
-  PushConstant m_pushConst{};  // Information sent to the shader
-  int          m_frame{-1};
-  FrameInfo    m_frameInfo{};
+  shaders::PushConstant m_pushConst{};  // Information sent to the shader
+  int                   m_frame{-1};
+  shaders::FrameInfo    m_frameInfo{};
 
   std::unique_ptr<nvvkhl::HdrEnv>                m_hdrEnv;
   std::unique_ptr<nvvkhl::HdrEnvDome>            m_hdrDome;

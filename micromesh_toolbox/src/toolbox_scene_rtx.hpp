@@ -19,7 +19,9 @@
 #include "nvvkhl/pipeline_container.hpp"
 
 #include "toolbox_scene_vk.hpp"
+#include "heightmap_rtx.h"
 
+struct ViewerSettings;
 
 class ToolboxSceneRtx
 {
@@ -27,10 +29,12 @@ public:
   ToolboxSceneRtx(nvvk::Context* ctx, nvvkhl::AllocVma* alloc, uint32_t queueFamilyIndex = 0U);
   ~ToolboxSceneRtx();
 
-  void create(const std::unique_ptr<micromesh_tool::ToolScene>& scene,
-              const std::unique_ptr<ToolboxSceneVk>& sceneVK,
-              bool useMicroMesh,
-              VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR);
+  void create(const ViewerSettings&                             settings,
+              const std::unique_ptr<micromesh_tool::ToolScene>& scene,
+              const std::unique_ptr<ToolboxSceneVk>&            sceneVK,
+              bool                                              hasMicroMesh,
+              VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                                                           | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR);
 
   VkAccelerationStructureKHR tlas() { return m_rtBuilder.getAccelerationStructure(); }
 
@@ -45,19 +49,25 @@ private:
   //--------------------------------------------------------------------------------------------------
   // Create all bottom level acceleration structures (BLAS)
   //
-  virtual void createBottomLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene,
-                                   const std::unique_ptr<ToolboxSceneVk>& sceneVK,
-                                   VkBuildAccelerationStructureFlagsKHR flags,
-                                   bool useMicroMesh);
+  virtual void createBottomLevelAS(const ViewerSettings&                             settings,
+                                   const std::unique_ptr<micromesh_tool::ToolScene>& scene,
+                                   const std::unique_ptr<ToolboxSceneVk>&            sceneVK,
+                                   VkBuildAccelerationStructureFlagsKHR              flags,
+                                   bool                                              hasMicroMesh,
+                                   bool                                              useMicroMesh);
 
   //--------------------------------------------------------------------------------------------------
   // Create the top level acceleration structures, referencing all BLAS
   //
-  virtual void createTopLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene, VkBuildAccelerationStructureFlagsKHR flags, bool useMicroMesh);
+  virtual void createTopLevelAS(const std::unique_ptr<micromesh_tool::ToolScene>& scene, VkBuildAccelerationStructureFlagsKHR flags);
 
   nvvk::Context*    m_ctx;
   nvvkhl::AllocVma* m_alloc;
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   nvvk::RaytracingBuilderKHR m_rtBuilder;
+
+  HrtxPipeline              m_heightmapPipeline{};
+  std::vector<HrtxMap>      m_heightmaps;
+  std::vector<nvvk::Buffer> m_heightmapDirections;
 };

@@ -1,14 +1,17 @@
 #ifndef HOST_DEVICE_H
 #define HOST_DEVICE_H
 
+#include "nvvkhl/shaders/dh_lighting.h"
+
 #ifdef __cplusplus
+#include <nvmath/nvmath.h>
+namespace shaders {
+using namespace nvvkhl_shaders;
 using mat4 = nvmath::mat4f;
 using vec4 = nvmath::vec4f;
 using vec3 = nvmath::vec3f;
 using vec2 = nvmath::vec2f;
 #endif  // __cplusplus
-
-#include "nvvkhl/shaders/dh_lighting.h"
 
 struct PushConstant
 {
@@ -100,5 +103,8 @@ struct FrameInfo
   float heightmapOffset;       // Additional UI-exposed heightmap offset
 };
 
+#ifdef __cplusplus
+}  // namespace shaders
+#endif
 
 #endif  // HOST_DEVICE_H

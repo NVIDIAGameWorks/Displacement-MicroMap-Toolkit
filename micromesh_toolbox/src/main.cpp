@@ -43,6 +43,7 @@
 #include "nvvkhl/tonemap_postprocess.hpp"
 #include "elements/element_nvml.hpp"
 #include "toolbox_viewer.hpp"
+#include "debug_util.h"
 
 std::shared_ptr<nvvkhl::ElementCamera> g_elem_camera;  // Is accessed elsewhere in the App
 
@@ -149,6 +150,10 @@ bool toolboxCheckResult(VkResult result, const char* /*file*/, int32_t /*line*/,
 ///
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+  fixAbortOnWindows();
+#endif
+
   static nvvkhl::SampleAppLog g_logger;
   nvprintSetCallback([](int level, const char* fmt) { g_logger.addLog(level, "%s", fmt); });
 
@@ -308,6 +313,7 @@ int main(int argc, char** argv)
   spec.ignoreDbgMessages.push_back(0xb80964e5);  // vkCreateMicromapEXT: value of pCreateInfo->type unknown
   spec.ignoreDbgMessages.push_back(0xa7bb8db6);  // SPIR-V Capability (StorageInputOutput16)
   spec.ignoreDbgMessages.push_back(0x715035dd);  // storageInputOutput16 is not enabled
+  spec.ignoreDbgMessages.push_back(0x06e224e9);  // yet another StorageInputOutput16 message
   spec.ignoreDbgMessages.push_back(0x22d5bbdc);  // vkCreateRayTracingPipelinesKHR: value of pCreateInfos[0].flags contains flag bits
   spec.ignoreDbgMessages.push_back(0xf69d66f5);  // vkGetAccelerationStructureBuildSizesKHR: pInfos[0].pGeometries[0].geometry.triangles.pNext chain includes a structure with unknown VkStructureType
 
@@ -385,6 +391,9 @@ int main(int argc, char** argv)
 
   // Cleanup
   vkDeviceWaitIdle(app->getContext()->m_device);
+#ifdef _DEBUG
+  vkDestroyDebugUtilsMessengerEXT(app->getContext()->m_instance, dbg_messenger, nullptr);
+#endif
   toolbox_viewer.reset();
   app.reset();
 

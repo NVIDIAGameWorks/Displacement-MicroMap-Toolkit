@@ -21,6 +21,8 @@
 
 // clang-format off
 #ifdef __cplusplus // GLSL Type
+#include <nvmath/nvmath.h>
+namespace shaders {
 using vec2 = nvmath::vec2f;
 using vec3 = nvmath::vec3f;
 using vec4 = nvmath::vec4f;
@@ -57,11 +59,12 @@ END_ENUM(SceneBindings);
 // Must match TextureType in meshops_operations.h.
 #ifndef __cplusplus
 const uint
-  eGeneric       = 0, 
-  eNormalMap     = 1, 
-  eQuaternionMap = 2, 
+  eGeneric       = 0,
+  eNormalMap     = 1,
+  eQuaternionMap = 2,
   eOffsetMap     = 3,
-  eHeightMap     = 4;
+  eHeightMap     = 4,
+  eNewNormalMap  = 5;
 #endif
 
 // clang-format on
@@ -196,5 +199,8 @@ struct Triangle
   uint meshTriangle;
 };
 
+#ifdef __cplusplus
+}  // namespace shaders
+#endif
 
 #endif  // HOST_DEVICE_H

@@ -38,21 +38,6 @@ public:
       m_ownedCtx = std::make_unique<nvvk::Context>();
       m_ownedCtx->init(createInfo);
       m_ptrs.context = m_ownedCtx.get();
-    }
-
-    // Fill in the optional queue overrides with queues on the nvvk::Context if
-    // they're not set. Meshops should always use these instead.
-    if(m_ptrs.queueGCT.queue == VK_NULL_HANDLE)
-    {
-      m_ptrs.queueGCT = m_ptrs.context->m_queueGCT;
-    }
-    if(m_ptrs.queueT.queue == VK_NULL_HANDLE)
-    {
-      m_ptrs.queueT = m_ptrs.context->m_queueT;
-    }
-    if(m_ptrs.queueC.queue == VK_NULL_HANDLE)
-    {
-      m_ptrs.queueC = m_ptrs.context->m_queueC;
 
       // Enable glsl debugPrintfEXT(fmt, ...) in debug builds
 #ifdef _DEBUG
@@ -70,13 +55,27 @@ public:
       };
 
       // #debug_printf : Creating the callback
-      VkDebugUtilsMessengerEXT           dbg_messenger{};
       VkDebugUtilsMessengerCreateInfoEXT dbg_messenger_create_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
       dbg_messenger_create_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
       dbg_messenger_create_info.messageType     = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
       dbg_messenger_create_info.pfnUserCallback = dbg_messenger_callback;
-      NVVK_CHECK(vkCreateDebugUtilsMessengerEXT(m_ptrs.context->m_instance, &dbg_messenger_create_info, nullptr, &dbg_messenger));
+      NVVK_CHECK(vkCreateDebugUtilsMessengerEXT(m_ownedCtx->m_instance, &dbg_messenger_create_info, nullptr, &m_dbgMessenger));
 #endif
+    }
+
+    // Fill in the optional queue overrides with queues on the nvvk::Context if
+    // they're not set. Meshops should always use these instead.
+    if(m_ptrs.queueGCT.queue == VK_NULL_HANDLE)
+    {
+      m_ptrs.queueGCT = m_ptrs.context->m_queueGCT;
+    }
+    if(m_ptrs.queueT.queue == VK_NULL_HANDLE)
+    {
+      m_ptrs.queueT = m_ptrs.context->m_queueT;
+    }
+    if(m_ptrs.queueC.queue == VK_NULL_HANDLE)
+    {
+      m_ptrs.queueC = m_ptrs.context->m_queueC;
     }
 
     if(!m_ptrs.vma)
@@ -115,11 +114,18 @@ public:
     }
     if(m_ownedCtx)
     {
+#ifdef _DEBUG
+      if(m_dbgMessenger)
+      {
+        vkDestroyDebugUtilsMessengerEXT(m_ownedCtx->m_instance, m_dbgMessenger, nullptr);
+      }
+#endif
       m_ownedCtx->deinit();
     }
   }
 
   std::unique_ptr<nvvk::Context> m_ownedCtx;
+  VkDebugUtilsMessengerEXT       m_dbgMessenger = VK_NULL_HANDLE;
   VmaAllocator                   m_ownedVMA = nullptr;
   nvvk::VMAMemoryAllocator       m_vmaMemoryAllocator;
   nvvk::ResourceAllocator        m_resourceAllocator;

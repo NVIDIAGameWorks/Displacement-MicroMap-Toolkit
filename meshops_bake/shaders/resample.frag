@@ -322,9 +322,12 @@ void main()
     {
       texSample = lanczos(4, texturesIn[i], hit.texCoord);
     }
-    else if(textureType == eNormalMap)
+    else if(textureType == eNormalMap || textureType == eNewNormalMap)
     {
-      texSample = lanczos(4, texturesIn[i], hit.texCoord);
+      if (textureType == eNormalMap)
+        texSample = lanczos(4, texturesIn[i], hit.texCoord);
+      else
+        texSample = vec4(0.5, 0.5, 1.0, 1.0);
       // Read from the normal map, and transform it to world-space.
       vec3 highNormal = texSample.xyz * 2.0 - 1.0;
       vec3 wsNormal   = highTBN * highNormal;

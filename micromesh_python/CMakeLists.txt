@@ -342,14 +342,12 @@ if((TARGET ${PROJECT_NAME}) AND (DEFINED USD_BIN_DIR))
   elseif (UNIX)
     add_custom_command(TARGET ${SCHEMA_PLUGIN_NAME} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy
-                        $<$<CONFIG:Debug>:${OUTPUT_PATH}/Debug/lib${SCHEMA_PLUGIN_NAME}.so> 
-                        $<$<NOT:$<CONFIG:Debug>>:${OUTPUT_PATH}/Release/lib${SCHEMA_PLUGIN_NAME}.so>
+                        $<TARGET_FILE:${SCHEMA_PLUGIN_NAME}>
                         ${NVMICROMESH_PLUGIN_BINARY_DIR}/lib${SCHEMA_PLUGIN_NAME}.so
     )
     add_custom_command(TARGET ${SCHEMA_PY_WRAPPER_LIB_NAME} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy
-                        $<$<CONFIG:Debug>:${OUTPUT_PATH}/Debug/${SCHEMA_PY_WRAPPER_LIB_NAME}.so> 
-                        $<$<NOT:$<CONFIG:Debug>>:${OUTPUT_PATH}/Release/${SCHEMA_PY_WRAPPER_LIB_NAME}.so>
+                        $<TARGET_FILE:${SCHEMA_PY_WRAPPER_LIB_NAME}>
                         ${NVMICROMESH_PLUGIN_BINARY_DIR}/${SCHEMA_PY_WRAPPER_LIB_NAME}.so
       COMMAND ${CMAKE_COMMAND} -E copy
                         ${NVMICROMESH_PLUGIN_SOURCE_DIR}/__init__.py

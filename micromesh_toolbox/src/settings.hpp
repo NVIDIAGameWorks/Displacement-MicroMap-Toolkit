@@ -94,7 +94,7 @@ struct ViewerSettings
   {
     // Default light
     lights.resize(1);
-    lights[0] = defaultLight();
+    lights[0] = nvvkhl_shaders::defaultLight();
   }
 
   enum EnvSystem
@@ -155,12 +155,12 @@ struct ViewerSettings
   nvmath::vec4f envColor     = {1.F, 1.F, 1.F, 1.F};   // Environment color multiplier
   float         envRotation  = 0.F;                    // Rotating the environment in degrees
 
-  RenderView    geometryView = {RenderViewSlot::eReference, false};
-  RenderView    overlayView  = {RenderViewSlot::eNone, false};
-  RenderView    shellView    = {RenderViewSlot::eNone, false};
-  RenderShading shading      = RenderShading::eRenderShading_default;
-  DebugMethod   debugMethod  = DebugMethod::eDbgMethod_none;
-  ColormapMode  colormap     = ColormapMode::eColormap_temperature;
+  RenderView             geometryView = {RenderViewSlot::eReference, false};
+  RenderView             overlayView  = {RenderViewSlot::eNone, false};
+  RenderView             shellView    = {RenderViewSlot::eNone, false};
+  shaders::RenderShading shading      = shaders::RenderShading::eRenderShading_default;
+  shaders::DebugMethod   debugMethod  = shaders::DebugMethod::eDbgMethod_none;
+  ColormapMode           colormap     = ColormapMode::eColormap_temperature;
 
   // Override for RenderShading::eFaceted
   float metallic{0.2F};
@@ -187,10 +187,11 @@ struct ViewerSettings
 
   // Heightmaps
   int   heightmapSubdivLevel{HEIGHTMAP_MAX_SUBDIV_LEVEL};
+  int   heightmapRTXSubdivLevel{5};
   float heightmapScale{1.0f};
   float heightmapOffset{0.0f};
 
-  std::vector<Light> lights;
+  std::vector<nvvkhl_shaders::Light> lights;
 
   ActivityStatus activtyStatus;  // UI blocker
 

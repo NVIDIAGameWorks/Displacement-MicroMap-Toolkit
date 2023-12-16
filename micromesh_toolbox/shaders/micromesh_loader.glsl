@@ -8,15 +8,11 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
-// PLEASE READ:
-// The rasterization of micromeshes, especially compressed is a bit of
-// a more complex topic on its own. Therefore there will be a future
-// dedicated sample that goes into details how it works
-// and showcases more features, such as dynamic level-of-detail.
-// We recommend to wait for this, rather than attempt to
-// embed the code from the toolkit. The future sample will also
-// provide more performant solutions and address compute-based
-// rasterization as well.
+/*
+ * NOTE: This file's content is based on older versions of code in
+ *       https://github.com/nvpro-samples/vk_displacement_micromaps. Please
+ *       follow micromesh rasterization examples there instead.
+ */
 
 // separated to ease integration with other renderers/apis
 

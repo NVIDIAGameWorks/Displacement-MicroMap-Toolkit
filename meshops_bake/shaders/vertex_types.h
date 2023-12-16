@@ -15,6 +15,7 @@
 
 #ifdef __cplusplus  // GLSL Type
 #include <glm/glm.hpp>
+namespace shaders {
 using namespace glm;
 #define INLINE inline
 #else
@@ -160,5 +161,9 @@ INLINE Vertex decompressVertex(CompressedVertex cv)
 
   return v;
 }
+
+#ifdef __cplusplus
+}  // namespace shaders
+#endif
 
 #endif

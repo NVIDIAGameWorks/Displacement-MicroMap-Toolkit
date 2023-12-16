@@ -20,8 +20,8 @@
 
 #include <thread>
 
+#include "nvmath/nvmath.h"
 #include "toolbox_viewer.hpp"
-
 
 #include "imgui/imgui_camera_widget.h"
 #include "imgui/imgui_helper.h"
@@ -488,11 +488,11 @@ bool ToolboxViewer::keyShortcuts()
     auto& shading  = m_settings.shading;
     auto  bshading = shading;
     if(ImGui::IsKeyPressed(ImGuiKey_F5))
-      shading = eRenderShading_default;
+      shading = shaders::eRenderShading_default;
     if(ImGui::IsKeyPressed(ImGuiKey_F6))
-      shading = eRenderShading_faceted;
+      shading = shaders::eRenderShading_faceted;
     if(ImGui::IsKeyPressed(ImGuiKey_F7))
-      shading = eRenderShading_phong;
+      shading = shaders::eRenderShading_phong;
 
     if(bshading != m_settings.shading)
     {
@@ -625,7 +625,7 @@ void ToolboxViewer::updateHbao()
   hbaoView.isOrtho              = false;
   hbaoView.projectionMatrix     = m_frameInfo.proj;
   m_settings.hbao.settings.radius = getScene(m_settings.geometryView.slot)->getDimensions()->radius * m_settings.hbao.radius;
-  vec4 hi = m_frameInfo.projInv * vec4(1, 1, -0.9, 1);
+  nvmath::vec4f hi = m_frameInfo.projInv * nvmath::vec4f(1, 1, -0.9, 1);
   hi /= hi.w;
   float tany           = hi.y / fabsf(hi.z);
   hbaoView.halfFovyTan = tany;
@@ -651,7 +651,8 @@ void ToolboxViewer::updateFrameInfo(VkCommandBuffer cmd)
   m_frameInfo.heightmapScale       = m_settings.heightmapScale;
   m_frameInfo.heightmapOffset      = m_settings.heightmapOffset;
 
-  vec3 linear = toLinear(vec3(m_settings.overlayColor.x, m_settings.overlayColor.y, m_settings.overlayColor.z));
+  nvmath::vec3f linear = nvvkhl_shaders::toLinear(
+      nvmath::vec3f(m_settings.overlayColor.x, m_settings.overlayColor.y, m_settings.overlayColor.z));
   m_frameInfo.overlayColor = ImGui::ColorConvertFloat4ToU32({linear.x, linear.y, linear.z, 1.0F});
 
   if(m_settings.envSystem == ViewerSettings::eSky)
@@ -670,7 +671,7 @@ void ToolboxViewer::updateFrameInfo(VkCommandBuffer cmd)
     m_frameInfo.maxLuminance = m_hdrEnv->getIntegral();
   }
 
-  vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(FrameInfo), &m_frameInfo);
+  vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(shaders::FrameInfo), &m_frameInfo);
 
   // Barrier
   // Make sure the buffer is available when using it
@@ -687,7 +688,7 @@ void ToolboxViewer::updateFrameInfo(VkCommandBuffer cmd)
 void ToolboxViewer::updateDirty()
 {
   ToolboxScene* toolbox_scene = getScene(m_settings.geometryView.slot);
-  if(toolbox_scene->noneDirty())
+  if(!toolbox_scene->valid() || toolbox_scene->noneDirty())
     return;
 
   // Will be doing only one wait, even if multiple elements are dirty
@@ -702,17 +703,6 @@ void ToolboxViewer::updateDirty()
   if(toolbox_scene->isDirty(SceneDirtyFlags::eDeviceMesh))
   {
     toolbox_scene->createVulkanBuffers();
-
-    // This path should be triggered whenever a scene is modified, e.g. baked.
-    // If the updated scene contains Bary data but there are no normal map, we
-    // use faceted rendering, otherwise there is no microvertex normal data.
-    bool viewingMicromap    = toolbox_scene->hasBary() && m_settings.geometryView.baked;
-    bool requiresNormalMaps = viewingMicromap && (m_settings.shading == eRenderShading_default);
-    if(requiresNormalMaps && !toolbox_scene->stats()->normalmaps)
-    {
-      m_settings.shading = eRenderShading_faceted;
-      LOGI("Switching to faceted rendering as there are no normal maps\n");
-    }
   }
 
 
@@ -722,13 +712,13 @@ void ToolboxViewer::updateDirty()
     if(toolbox_scene->isDirty(SceneDirtyFlags::eRtxPipeline))
     {
       waitFct();
-      toolbox_scene->createRtxPipeline({m_sky->getDescriptorSetLayout(), m_hdrEnv->getDescriptorSetLayout()});
+      toolbox_scene->createRtxPipeline(m_settings, {m_sky->getDescriptorSetLayout(), m_hdrEnv->getDescriptorSetLayout()});
     }
 
     if(toolbox_scene->isDirty(SceneDirtyFlags::eRtxAccelerations))
     {
       waitFct();
-      toolbox_scene->createRtxAccelerations(m_settings.geometryView.baked);
+      toolbox_scene->createRtxAccelerations(m_settings);
     }
   }
 
@@ -891,7 +881,7 @@ void ToolboxViewer::createVulkanBuffers()
   VkCommandBuffer cmd = m_app->createTempCmdBuffer();
 
   // Create the buffer of the current frame, changing at each frame
-  m_bFrameInfo = m_alloc->createBuffer(sizeof(FrameInfo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+  m_bFrameInfo = m_alloc->createBuffer(sizeof(shaders::FrameInfo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   m_dutil->DBG_NAME(m_bFrameInfo.buffer);
 
@@ -984,7 +974,7 @@ void ToolboxViewer::raytraceScene(VkCommandBuffer cmd)
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.plines[0]);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.layout, 0,
                           static_cast<uint32_t>(desc_sets.size()), desc_sets.data(), 0, nullptr);
-  vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_ALL, 0, sizeof(PushConstant), &m_pushConst);
+  vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_ALL, 0, sizeof(shaders::PushConstant), &m_pushConst);
 
   const std::array<VkStridedDeviceAddressRegionKHR, 4>& regions = toolbox_scene->getSbtRegions();
   const VkExtent2D&                                     size    = m_gBuffers->getSize();
@@ -1104,7 +1094,7 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
           if(!device_vk->vertexDirectionBoundsBuffer.buffer)
             m_pushConst.microScaleBias = {basic.groups[0].floatScale.r, basic.groups[0].floatBias.r};
 
-          vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(PushConstant), &m_pushConst);
+          vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(shaders::PushConstant), &m_pushConst);
 
           // Use mesh shaders to generate tessellated geometry for meshes with
           // micromesh displacement
@@ -1119,7 +1109,7 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
         m_pushConst.triangleCount = numBaseTriangles;
 
         // The heightmap image, bias, scale etc. are already on the material
-        vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(PushConstant), &m_pushConst);
+        vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(shaders::PushConstant), &m_pushConst);
 
         int numWorkgroups = (numBaseTriangles + MICRO_GROUP_SIZE - 1) / MICRO_GROUP_SIZE;
         vkCmdDrawMeshTasksNV(cmd, numWorkgroups, 0);
@@ -1127,7 +1117,7 @@ void ToolboxViewer::renderNodes(VkCommandBuffer              cmd,
     }
     else
     {
-      vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(PushConstant), &m_pushConst);
+      vkCmdPushConstants(cmd, pipeline.layout, stages, 0, sizeof(shaders::PushConstant), &m_pushConst);
       vkCmdBindVertexBuffers(cmd, 0, 1, &vbuffer, &offsets);
       vkCmdBindIndexBuffer(cmd, device_vk->triangleVertexIndexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
       vkCmdDrawIndexed(cmd, index_count, numIndexed, 0, 0, 0);
@@ -1245,7 +1235,7 @@ void ToolboxViewer::renderRasterScene(VkCommandBuffer cmd)
     renderNodes(cmd, shell_scene->getNodes(SceneNodeMethods::eAll, SceneNodeMicromesh::eMicromeshDontCare), shell_scene, 2, 1);
   }
 
-  if(m_settings.debugMethod == eDbgMethod_normal || m_settings.debugMethod == eDbgMethod_direction)
+  if(m_settings.debugMethod == shaders::eDbgMethod_normal || m_settings.debugMethod == shaders::eDbgMethod_direction)
   {
     std::vector dset = {toolbox_scene->getDescSet(), m_hdrDome->getDescSet(), m_sky->getDescriptorSet()};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0,
@@ -1501,10 +1491,10 @@ void ToolboxViewer::rtxPicking(const ImVec2& mousePosNorm)
   }
 
   // Find where the hit point is and set the interest position
-  const nvmath::vec3f world_pos = nvmath::vec3f(pr.worldRayOrigin + pr.worldRayDirection * pr.hitT);
-  nvmath::vec3f       eye;
-  nvmath::vec3f       center;
-  nvmath::vec3f       up;
+  const glm::vec3 world_pos = glm::vec3(pr.worldRayOrigin + pr.worldRayDirection * pr.hitT);
+  glm::vec3       eye;
+  glm::vec3       center;
+  glm::vec3       up;
   CameraManip.getLookat(eye, center, up);
   CameraManip.setLookat(eye, world_pos, up, false);
 
@@ -1538,9 +1528,9 @@ void ToolboxViewer::rasterPicking(const ImVec2& mousePosNorm)
     const nvmath::vec3f hit_pos = unprojectScreenPosition(m_gBuffers->getSize(), {x, y, d}, view, proj);
 
     // Set the interest position
-    nvmath::vec3f eye, center, up;
+    glm::vec3 eye, center, up;
     CameraManip.getLookat(eye, center, up);
-    CameraManip.setLookat(eye, hit_pos, up, false);
+    CameraManip.setLookat(eye, glm::vec3(hit_pos), up, false);
   }
 }
 

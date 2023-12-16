@@ -201,7 +201,7 @@ static std::string getNewTextureFilename(const BakerManagerConfig& info, const N
   // Use the explicitly given output stem if it exists (typically from
   // micromesh_tool CLI). Else, generate one based on the material name.
   std::string stem = info.outTextureStem;
-  if(stem.empty() && source.material != nullptr)
+  if(stem.empty() && source.material != nullptr && !source.material->name.empty())
   {
     stem = sanitizeFilename(source.material->name);
   }
@@ -385,7 +385,8 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
   if(info.texturesToResample == TexturesToResample::eNone  //
      && info.quaternionTexturesStem.empty()                //
      && info.offsetTexturesStem.empty()                    //
-     && info.heightTexturesStem.empty())
+     && info.heightTexturesStem.empty()                    //
+     && info.normalTexturesStem.empty())
   {
     // We're not resampling! No need to do anything - just resize
     // `instructions` so we preserve the "one `ResampleMeshInstructions` per
@@ -412,6 +413,7 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
           "multiple input meshes and multiple input materials, you may wish to ensure the output has (untexured) "
           "materials.\n")
     }
+    // TODO: avoid creating an unreferenced default material
     lowMesh->materials().push_back(defaultMaterial);
     for(auto& mesh : lowMesh->meshes())
       mesh->relations().material = 0;
@@ -452,6 +454,8 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
 
   std::unordered_set<int> loImagesToWrite;    // All images we'll write to
   std::unordered_set<int> loImagesToReplace;  // All images we'll write to that aren't new images.
+
+  std::unordered_set<size_t> meshesWithResampledNormalMaps;  // To avoid generating normal maps for meshes that are already resampled
 
   // Record textures that are to be resampled into each output image so it can be sized to the maximum
   std::map<int, std::vector<int>> loImageSources;
@@ -587,8 +591,14 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
         instruction.texelContent =
             ((field < GltfTextureField::eNormalFieldsEnd) ? meshops::TextureType::eNormalMap : meshops::TextureType::eGeneric);
         instruction.inputIndex  = hiResImageIdx;
-        instruction.outputIndex = loResImageIdx;
+        instruction.outputIndex = loResImageIdx;  // m_resamplingOutputStorage contains space for all existing images
+        instruction.sceneImage  = loResImageIdx;
         instructions[meshIdx].instructions.push_back(instruction);
+
+        if(instruction.texelContent == meshops::TextureType::eNormalMap)
+        {
+          meshesWithResampledNormalMaps.insert(meshIdx);
+        }
       }
     }
   }
@@ -616,8 +626,8 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
     // Use the global output resolution, or the maximum resolution of all
     // contributing textures, e.g. when a low resolution material references
     // textures used by separate high resolution materials.
-    glm::uvec2 size{info.resampleResolution, info.resampleResolution};
-    if(info.resampleResolution == 0)
+    glm::uvec2 size{info.resampleResolution.x, info.resampleResolution.y};
+    if(info.resampleResolution.x == 0)
     {
       for(int hiImgIdx : loImageSources[loImgIdx])
       {
@@ -702,14 +712,14 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
     {
       outTex.filePath = extraTexture.outURI;
     }
-    if(info.resampleResolution == 0)
+    if(info.resampleResolution.x == 0)
     {
       outTex.info.extent = hiTex.info.extent;
     }
     else
     {
-      outTex.info.extent.width  = static_cast<uint32_t>(info.resampleResolution);
-      outTex.info.extent.height = static_cast<uint32_t>(info.resampleResolution);
+      outTex.info.extent.width  = static_cast<uint32_t>(info.resampleResolution.x);
+      outTex.info.extent.height = static_cast<uint32_t>(info.resampleResolution.y);
     }
     outTex.info.mipLevels  = nvvk::mipLevels(outTex.info.extent);
     outTex.info.format     = RESAMPLE_COLOR_FORMAT;
@@ -720,6 +730,7 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
     instruction.texelContent = (extraTexture.isNormalMap ? meshops::TextureType::eNormalMap : meshops::TextureType::eGeneric);
     instruction.inputIndex  = m_resamplingInputStorage.size() - 1;
     instruction.outputIndex = m_resamplingOutputStorage.size() - 1;
+    instruction.sceneImage  = AuxOutputIndex;  // All extra textures are stored with ToolScene::appendAuxImage()
     instructions[extraTexture.meshIdx].instructions.push_back(instruction);
   }
 
@@ -728,34 +739,43 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
   {
     // Determine what resolution they should be, since they have no
     // corresponding input. If resampleResolution was specified, we use that:
-    uint32_t noInputResolution = info.resampleResolution;
-    if(noInputResolution == 0)
+    nvmath::vec2ui noInputResolution = {info.resampleResolution.x, info.resampleResolution.y};
+    if(noInputResolution.x == 0)
     {
       // Otherwise, we use the maximum resolution of our inputs:
       for(const GPUTextureContainer& inputTexture : m_resamplingInputStorage)
       {
-        noInputResolution = std::max(inputTexture.info.extent.width, noInputResolution);
-        noInputResolution = std::max(inputTexture.info.extent.height, noInputResolution);
+        noInputResolution.x = std::max(inputTexture.info.extent.width, noInputResolution.x);
+        noInputResolution.y = std::max(inputTexture.info.extent.height, noInputResolution.y);
       }
-    }
-    if(noInputResolution == 0)
-    {
-      // Otherwise, we could silently choose, say, 4096 x 4096. We'll warn
-      // about this, though.
-      noInputResolution = 4096;
-      if((!info.quaternionTexturesStem.empty()) || (!info.offsetTexturesStem.empty()) || (!info.heightTexturesStem.empty()))
+      // Otherwise, we could silently choose, say, 4096 x 4096.
+      bool noInputTextures = noInputResolution.x == 0;
+      if(noInputTextures)
       {
-        LOGW(
-            "Warning: Quaternion textures or offset textures were requested, but their resolution was unspecified, "
-            "since there were no other input textures and --resample-resolution was 0. Choosing a resolution of %u x "
-            "%u.",
-            noInputResolution, noInputResolution);
+        noInputResolution = {4096, 4096};
+      }
+      // Warn that a somewhat arbitrary resolution has been chosen
+      if((!info.quaternionTexturesStem.empty()) || (!info.offsetTexturesStem.empty())
+         || (!info.heightTexturesStem.empty()) || (!info.normalTexturesStem.empty()))
+      {
+        if(noInputTextures)
+        {
+          LOGW(
+              "Warning: Texture generation was requested, but their resolution was unspecified, since there were no "
+              "other input textures and --resample-resolution was 0. Choosing a resolution of %u x %u.",
+              noInputResolution.x, noInputResolution.y);
+        }
+        else
+        {
+          LOGI("Texture generation using resolution %u x %u.", noInputResolution.x, noInputResolution.y);
+        }
       }
     }
-    std::array<std::pair<const std::string*, meshops::TextureType>, 3> cases;
+    std::array<std::pair<const std::string*, meshops::TextureType>, 4> cases;
     cases[0] = {&info.quaternionTexturesStem, meshops::TextureType::eQuaternionMap};
     cases[1] = {&info.offsetTexturesStem, meshops::TextureType::eOffsetMap};
     cases[2] = {&info.heightTexturesStem, meshops::TextureType::eHeightMap};
+    cases[3] = {&info.normalTexturesStem, meshops::TextureType::eNewNormalMap};
     for(const auto& stemContent : cases)
     {
       const std::string& stem = *stemContent.first;
@@ -766,11 +786,34 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
 
       for(size_t meshIdx = 0; meshIdx < lowMesh->meshes().size(); meshIdx++)
       {
+        std::string nameExtra;
+        int32_t     materialIndex = lowMesh->meshes()[meshIdx]->relations().material;
+        if(materialIndex != -1)
+        {
+          auto& meshName     = lowMesh->meshes()[meshIdx]->meta().name;
+          auto& materialName = lowMesh->materials()[materialIndex].name;
+          if(!materialName.empty())
+          {
+            nameExtra = "." + sanitizeFilename(materialName);
+          }
+          else if(!meshName.empty())
+          {
+            nameExtra = "." + sanitizeFilename(meshName);
+          }
+        }
+
         GPUTextureContainer& outTex = m_resamplingOutputStorage.emplace_back(GPUTextureContainer{});
-        outTex.filePath             = stem + "." + std::to_string(meshIdx) + ".png";
-        outTex.info.extent.width    = noInputResolution;
-        outTex.info.extent.height   = noInputResolution;
+        outTex.filePath             = stem + "." + std::to_string(meshIdx) + nameExtra + ".png";
+        outTex.info.extent.width    = noInputResolution.x;
+        outTex.info.extent.height   = noInputResolution.y;
         outTex.info.mipLevels       = nvvk::mipLevels(outTex.info.extent);
+
+        ResampleInstruction instruction;
+        instruction.texelContent = stemContent.second;
+        instruction.inputIndex   = NoInputIndex;
+        instruction.outputIndex  = m_resamplingOutputStorage.size() - 1;
+        instruction.sceneImage   = AuxOutputIndex;
+
         switch(stemContent.second)
         {
           default:
@@ -784,14 +827,48 @@ bool BakerManager::generateInstructions(const BakerManagerConfig&               
           case meshops::TextureType::eHeightMap:
             outTex.info.format = RESAMPLE_HEIGHT_FORMAT;
             break;
+          case meshops::TextureType::eNewNormalMap:
+            outTex.info.format = RESAMPLE_NORMAL_FORMAT;
+            if(meshesWithResampledNormalMaps.count(meshIdx) != 0)
+            {
+              // Skip this one. The reference mesh has normal map to resample.
+              continue;
+            }
+            else
+            {
+              // Create a material reference for the new normal map, unlike the other "aux" image types
+              int loResTextureIdx = static_cast<int>(lowMesh->textures().size());
+              int loResImageIdx   = lowMesh->createImage();
+
+              tinygltf::Texture newTexture;
+              newTexture.source = loResImageIdx;
+              lowMesh->textures().push_back(newTexture);
+
+              const std::unique_ptr<micromesh_tool::ToolMesh>& loMesh = lowMesh->meshes()[meshIdx];
+
+              // Create a material if one doesn't exist or duplicate a new
+              // material for the normal map in case it's shared by different
+              // geometry
+              int loMaterialIdx = static_cast<int>(lowMesh->materials().size());
+              lowMesh->materials().emplace_back(defaultMaterial);
+              lowSceneMaterials.m_materials.emplace_back();
+              if(loMesh->relations().material != -1)
+              {
+                lowMesh->materials()[loMaterialIdx] = lowMesh->materials()[loMesh->relations().material];
+                lowMesh->materials()[loMaterialIdx].name += "Mesh" + std::to_string(meshIdx);
+                lowSceneMaterials.m_materials[loMaterialIdx] = lowSceneMaterials.m_materials[loMesh->relations().material];
+              }
+              loMesh->relations().material = loMaterialIdx;
+
+              tinygltf::Material& loMatTG = lowMesh->materials()[loMaterialIdx];
+              nvh::GltfMaterial&  loMat   = lowSceneMaterials.m_materials[loMaterialIdx];
+              setTextureField(loMatTG, loMat, GltfTextureField::eNormal, loResTextureIdx, tinygltf::Material{});
+              instruction.sceneImage = loResImageIdx;
+            }
+            break;
         }
         outTex.storageLocation = GPUTextureContainer::Storage::eCreateOnFirstUse;
         assert(!outTex.filePath.empty());
-
-        ResampleInstruction instruction;
-        instruction.texelContent = stemContent.second;
-        instruction.inputIndex   = NoInputIndex;
-        instruction.outputIndex  = m_resamplingOutputStorage.size() - 1;
         instructions[meshIdx].instructions.push_back(instruction);
       }
     }
@@ -1057,9 +1134,6 @@ void BakerManager::finishTexturesForMesh(nvvk::Context::Queue queueGCT, const Re
 
   nvvk::CommandPool cmdPool(m_device, queueGCT.familyIndex, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, queueGCT.queue);
 
-  std::mutex        gpuAccess;
-  std::atomic<bool> allThreadsOk = true;
-
   // We process these in two steps: writing eOutput textures, and destroying
   // all textures.
   // This is because to correctly fill in gaps in a texture, we need to know
@@ -1076,103 +1150,104 @@ void BakerManager::finishTexturesForMesh(nvvk::Context::Queue queueGCT, const Re
     }
   }
 
-  nvh::parallel_batches<1>(
-      outputTextureIndices.size(),
-      [&](uint64_t arrayIdx) {
-        const FinalUse        finalUse     = finalUses[outputTextureIndices[arrayIdx]];
-        const GPUTextureIndex textureIndex = finalUse.index;
-        GPUTextureContainer&  tex          = getResamplingTexture(textureIndex);
-        assert(tex.storageLocation == GPUTextureContainer::Storage::eVRAM);
-        assert(textureIndex.vec == GPUTextureIndex::VectorIndex::eOutput);
+  for(size_t arrayIdx = 0; arrayIdx < outputTextureIndices.size(); ++arrayIdx)
+  {
+    const FinalUse&       finalUse     = finalUses[outputTextureIndices[arrayIdx]];
+    const GPUTextureIndex textureIndex = finalUse.index;
+    GPUTextureContainer&  tex          = getResamplingTexture(textureIndex);
+    assert(tex.storageLocation == GPUTextureContainer::Storage::eVRAM);
+    assert(textureIndex.vec == GPUTextureIndex::VectorIndex::eOutput);
 
+    {
+      const uint32_t w = tex.info.extent.width;
+      const uint32_t h = tex.info.extent.height;
+
+      // Apply pull-push filtering if possible, then download its data.
+      const void* dataMapped;
+      {
+        PullPushFilter::Views pullPushViews;
+        VkCommandBuffer       cmdBuf = cmdPool.createCommandBuffer();
+
+        PullPushFilter::ImageInfo pullPushRGBAInfo;
+        pullPushRGBAInfo.width       = w;
+        pullPushRGBAInfo.height      = h;
+        pullPushRGBAInfo.levelCount  = tex.info.mipLevels;
+        pullPushRGBAInfo.image       = tex.texture.image;
+        pullPushRGBAInfo.imageFormat = tex.info.format;
+
+        const GPUTextureContainer& distanceTex = m_resamplingDistanceStorage[m_outputToDistanceTextureMap[textureIndex.idx]];
+        PullPushFilter::ImageInfo pullPushDistanceWeightInfo = pullPushRGBAInfo;
+        pullPushDistanceWeightInfo.image                     = distanceTex.texture.image;
+        pullPushDistanceWeightInfo.imageFormat               = distanceTex.info.format;
+
+        m_pullPushFilter.initViews(pullPushViews, pullPushRGBAInfo, pullPushDistanceWeightInfo);
+        const PullPushFilter::Pipes& pipelines = (finalUse.onlyContainsNormals ? m_pullPushFilterPipesNormals :  //
+                                                      (finalUse.onlyContainsQuaternions ? m_pullPushFilterPipesQuaternions :  //
+                                                           m_pullPushFilterPipesGeneral));
+        // Note that this returns true instead of false on failure.
+        if(m_pullPushFilter.process(cmdBuf, pipelines, pullPushRGBAInfo, pullPushDistanceWeightInfo, pullPushViews))
         {
-          const uint32_t w = tex.info.extent.width;
-          const uint32_t h = tex.info.extent.height;
+          LOGW("Warning: Pull-push filtering %s (%u x %u) failed.", tex.filePath.c_str(), w, h);
+        }
 
-          // Apply pull-push filtering if possible, then download its data.
-          const void* dataMapped;
+        nvvk::cmdBarrierImageLayout(cmdBuf, tex.texture.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        tex.texture.descriptor.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        dataMapped                         = downloadImage(*m_alloc, cmdBuf, tex);
+        cmdPool.submitAndWait(cmdBuf);
+
+        m_pullPushFilter.deinitViews(pullPushViews);
+      }
+
+      // dataMapped is an indirect pointer into GPU memory, which means
+      // accesses to it will go over the PCIe bus, which makes our image
+      // writer slow. By allocating this buffer, we only need to access
+      // each element over PCIe once.
+      assert(tex.info.format == VK_FORMAT_R8G8B8A8_UNORM || tex.info.format == VK_FORMAT_R16_UNORM
+             || tex.info.format == VK_FORMAT_R16G16B16A16_UNORM);
+      const size_t mip0SizeBytes = tex.mipSizeInBytes(0);
+
+      // Initialize the ToolImage with the data.
+      micromesh_tool::ToolImage::Info toolImageInfo;
+      toolImageInfo.width             = tex.info.extent.width;
+      toolImageInfo.height            = tex.info.extent.height;
+      toolImageInfo.components        = tex.bytesPerPixel() / tex.bytesPerComponent();
+      toolImageInfo.componentBitDepth = tex.bytesPerComponent() * 8;
+      auto toolImage                  = micromesh_tool::ToolImage::create(toolImageInfo, tex.filePath);
+      if(toolImage)
+      {
+        assert(toolImage->info().totalBytes() == mip0SizeBytes);
+        memcpy(toolImage->raw(), dataMapped, mip0SizeBytes);
+
+        // Insert the image into the scene. Aux images are always new and
+        // are simply appended to the scene to be saved in the same location
+        // as the gltf. All other images have been resampled so we need to
+        // replace existing images.
+        // TODO: avoid this linear search
+        size_t sceneImage = AuxOutputIndex;
+        for(auto& instruction : meshInstructions.instructions)
+        {
+          if(instruction.outputIndex == textureIndex.idx)
           {
-            // Make sure only one thread enters this section at a time
-            std::lock_guard<std::mutex> lock(gpuAccess);
-
-            PullPushFilter::Views pullPushViews;
-            VkCommandBuffer       cmdBuf = cmdPool.createCommandBuffer();
-
-            PullPushFilter::ImageInfo pullPushRGBAInfo;
-            pullPushRGBAInfo.width       = w;
-            pullPushRGBAInfo.height      = h;
-            pullPushRGBAInfo.levelCount  = tex.info.mipLevels;
-            pullPushRGBAInfo.image       = tex.texture.image;
-            pullPushRGBAInfo.imageFormat = tex.info.format;
-
-            const GPUTextureContainer& distanceTex =
-                m_resamplingDistanceStorage[m_outputToDistanceTextureMap[textureIndex.idx]];
-            PullPushFilter::ImageInfo pullPushDistanceWeightInfo = pullPushRGBAInfo;
-            pullPushDistanceWeightInfo.image                     = distanceTex.texture.image;
-            pullPushDistanceWeightInfo.imageFormat               = distanceTex.info.format;
-
-            m_pullPushFilter.initViews(pullPushViews, pullPushRGBAInfo, pullPushDistanceWeightInfo);
-            const PullPushFilter::Pipes& pipelines = (finalUse.onlyContainsNormals ? m_pullPushFilterPipesNormals :  //
-                                                          (finalUse.onlyContainsQuaternions ? m_pullPushFilterPipesQuaternions :  //
-                                                               m_pullPushFilterPipesGeneral));
-            // Note that this returns true instead of false on failure.
-            if(m_pullPushFilter.process(cmdBuf, pipelines, pullPushRGBAInfo, pullPushDistanceWeightInfo, pullPushViews))
-            {
-              LOGW("Warning: Pull-push filtering %s (%u x %u) failed.", tex.filePath.c_str(), w, h);
-            }
-
-            nvvk::cmdBarrierImageLayout(cmdBuf, tex.texture.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            tex.texture.descriptor.imageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            dataMapped                         = downloadImage(*m_alloc, cmdBuf, tex);
-            cmdPool.submitAndWait(cmdBuf);
-
-            m_pullPushFilter.deinitViews(pullPushViews);
-          }
-
-          // dataMapped is an indirect pointer into GPU memory, which means
-          // accesses to it will go over the PCIe bus, which makes our image
-          // writer slow. By allocating this buffer, we only need to access
-          // each element over PCIe once.
-          assert(tex.info.format == VK_FORMAT_R8G8B8A8_UNORM || tex.info.format == VK_FORMAT_R16_UNORM
-                 || tex.info.format == VK_FORMAT_R16G16B16A16_UNORM);
-          const size_t         mip0SizeBytes = tex.mipSizeInBytes(0);
-
-          // Initialize the ToolImage with the data.
-          micromesh_tool::ToolImage::Info toolImageInfo;
-          toolImageInfo.width             = tex.info.extent.width;
-          toolImageInfo.height            = tex.info.extent.height;
-          toolImageInfo.components        = tex.bytesPerPixel() / tex.bytesPerComponent();
-          toolImageInfo.componentBitDepth = tex.bytesPerComponent() * 8;
-          auto toolImage                  = micromesh_tool::ToolImage::create(toolImageInfo, tex.filePath);
-          if(toolImage)
-          {
-            assert(toolImage->info().totalBytes() == mip0SizeBytes);
-            memcpy(toolImage->raw(), dataMapped, mip0SizeBytes);
-
-            // Insert the image into the scene. Aux images are alwaus new and
-            // are simply appended to the scene to be saved in the same location
-            // as the gltf. All other images have been resampled so we need to
-            // replace existing images.
-            bool isAuxImage = static_cast<size_t>(textureIndex.idx) >= m_lowMesh->images().size();
-            if(isAuxImage)
-            {
-              m_lowMesh->appendAuxImage(std::move(toolImage));
-            }
-            else
-            {
-              // Replace the ToolImage
-              assert(textureIndex.idx < m_lowMesh->images().size());
-              m_lowMesh->setImage(textureIndex.idx, std::move(toolImage));
-            }
-          }
-          else
-          {
-            LOGE("Error: Failed to allocate auxiliary image output for %s\n", tex.filePath.c_str());
+            sceneImage = instruction.sceneImage;
           }
         }
-      },  // If outputTextureIndices.size() is smaller than the number of threads here,
-      // nvh::parallel_batches will process them one by one. We want to avoid that.
-      std::min(m_numThreads, uint32_t(outputTextureIndices.size())));
+        if(sceneImage == AuxOutputIndex)
+        {
+          m_lowMesh->appendAuxImage(std::move(toolImage));
+        }
+        else
+        {
+          // Replace the ToolImage
+          assert(sceneImage < m_lowMesh->images().size());
+          m_lowMesh->setImage(sceneImage, std::move(toolImage));
+        }
+      }
+      else
+      {
+        LOGE("Error: Failed to allocate auxiliary image output for %s\n", tex.filePath.c_str());
+      }
+    }
+  }
 
   // Destroy all textures
   for(const FinalUse& finalUse : finalUses)
@@ -1195,12 +1270,6 @@ void BakerManager::finishTexturesForMesh(nvvk::Context::Queue queueGCT, const Re
   }
 
   m_alloc->finalizeAndReleaseStaging();
-
-  if(!allThreadsOk.load())
-  {
-    LOGW("Some resampled images failed to save!\n");
-    // But this may be okay; carry on for now.
-  }
 }
 
 std::vector<ResampleTextureContainer> BakerManager::getResampleTextures(const ResampleMeshInstructions& meshInstructions) const

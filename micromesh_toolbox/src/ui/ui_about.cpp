@@ -36,9 +36,9 @@ void uiAbout(bool* p_open)
         "some of the tools. It relies on VK_NV_mesh_shader to allow rasterized display of micromeshes. "
         "VK_KHR_acceleration_structure is required for baking micromaps. If available, VK_NV_displacement_micromap is "
         "used to render micromeshes with raytracing when choosing Rendering -> RTX. VK_NV_displacement_micromap was "
-        "introduced with the Ada Lovelace architecture based GPUs. If you see a message about the missing extension, "
-        "update to the latest driver (note: beta drivers are available at "
-        "https://developer.nvidia.com/vulkan-driver).");
+        "introduced with the RTX 40 Series Ada Lovelace architecture based GPUs. Previous RTX cards have support, but "
+        "performance will be better with Ada. If you see a message about the missing extension, update to the latest "
+        "driver (note: beta drivers are available at https://developer.nvidia.com/vulkan-driver).");
     ImGui::End();
   }
 }
