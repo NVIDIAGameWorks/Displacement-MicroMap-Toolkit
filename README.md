@@ -1,3 +1,13 @@
+> [!IMPORTANT]
+> This project has been archived and is no longer maintained. The vulkan
+> extension `VK_NV_displacement_micromap` is no longer available.
+>
+> We recommend exploring [**NVIDIA RTX Mega
+> Geometry**](https://developer.nvidia.com/blog/nvidia-rtx-mega-geometry-now-available-with-new-vulkan-samples/),
+> which can provide similar functionality with greater flexibility. See
+> [vk_tessellated_clusters](https://github.com/nvpro-samples/vk_tessellated_clusters),
+> which demonstrates raytracing displacement with Vulkan.
+
 # NVIDIA Displacement Micro-Map Toolkit
 
 This toolkit provides libraries, samples and tools to create and view displaced micromeshes.
